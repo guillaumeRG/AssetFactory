@@ -1,12 +1,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "status", "doctor", "triposr", "comfyui", "help")]
+    [ValidateSet("install", "status", "doctor", "triposr", "comfyui", "trellis", "help")]
     [string]$Command = "help",
 
     [Parameter(Position = 1)]
-    [Alias("TriposrCommand", "ComfyUiCommand")]
-    [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install")]
+    [Alias("TriposrCommand", "ComfyUiCommand", "TrellisCommand")]
+    [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install", "runtime-install", "runtime-status", "runtime-doctor", "native-install", "native-status", "native-doctor")]
     [string]$EngineCommand = "status",
 
     [switch]$NoInstall
@@ -15,7 +15,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "0.5.3"
+$ScriptVersion = "0.6.3"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $MinimumPowerShellVersion = [version]"5.1"
 $Script:HadWarnings = $false
@@ -29,7 +29,9 @@ $RequiredDirs = @(
     "tools",
     "workflows",
     "batches",
-    "docs"
+    "docs",
+    "profiles",
+    "unreal"
 )
 
 # TripoSR engine configuration. The engine is installed locally under engines/triposr
@@ -40,6 +42,60 @@ $TripoSrVenv = Join-Path $TripoSrRoot ".venv"
 $TripoSrVenvPython = Join-Path $TripoSrVenv "Scripts\python.exe"
 $TripoSrRequirements = Join-Path $TripoSrRoot "requirements.txt"
 $TripoSrPreferredPythonVersions = @("3.11", "3.10")
+
+
+# TRELLIS v1 configuration.
+#
+# AF-08A keeps an official TRELLIS checkout isolated under engines/trellis.
+# AF-08B adds a second Python 3.12 runtime venv so experimentation with modern
+# PyTorch/CUDA does not mutate ComfyUI, TripoSR, global Python or the initial
+# bootstrap venv.
+$TrellisRepoUrl = "https://github.com/microsoft/TRELLIS.git"
+$TrellisPinnedCommit = "442aa1e"
+$TrellisPinnedFlexiCubesCommit = "815e075a2a400d06c48d94c347674344ed6ae5c5"
+$TrellisRoot = Join-Path $ProjectRoot "engines\trellis"
+
+$TrellisBootstrapVenv = Join-Path $TrellisRoot ".venv"
+$TrellisBootstrapVenvPython = Join-Path $TrellisBootstrapVenv "Scripts\python.exe"
+$TrellisBootstrapPythonVersion = "3.10"
+
+$TrellisRuntimeVenv = Join-Path $TrellisRoot ".venv-runtime"
+$TrellisRuntimeVenvPython = Join-Path $TrellisRuntimeVenv "Scripts\python.exe"
+$TrellisRuntimePythonVersion = "3.12"
+
+# Official PyTorch wheels. CUDA 13 runtime libraries are provided by the wheel;
+# installing a CUDA 13 Toolkit globally is intentionally NOT required here.
+# The local CUDA Toolkit 12.8 remains untouched for existing engines.
+$TrellisTorchVersion = "2.13.0"
+$TrellisTorchIndexUrl = "https://download.pytorch.org/whl/cu130"
+$TrellisExpectedTorchCuda = "13.0"
+
+$TrellisAttentionBackend = "sdpa"
+
+
+# Native TRELLIS CUDA extensions are deliberately not installed in v0.6.1.
+# Upstream's setup.sh does not support the modern Windows/PyTorch/CUDA matrix
+# we are targeting. We validate the runtime foundation first, then add pinned
+# open-source/precompiled native components one by one in AF-08C.
+$TrellisBasicPackages = @(
+    "pillow",
+    "imageio",
+    "imageio-ffmpeg",
+    "tqdm",
+    "easydict",
+    "opencv-python-headless",
+    "scipy",
+    "ninja",
+    "rembg",
+    "onnxruntime",
+    "trimesh",
+    "xatlas",
+    "pyvista",
+    "pymeshfix",
+    "igraph",
+    "transformers",
+    "huggingface_hub"
+)
 
 # ComfyUI engine configuration. Runtime repository, venv and models stay local.
 $ComfyUiRepoUrl = "https://github.com/Comfy-Org/ComfyUI.git"
@@ -499,6 +555,9 @@ function Ensure-GitIgnore {
         "cache/",
         "engines/triposr/",
         "engines/comfyui/",
+        "engines/trellis/",
+        "profiles/*.json",
+        "!profiles/unreal.example.json",
         "*.log",
         "*.tmp"
     )
@@ -554,13 +613,12 @@ function Ensure-Readme {
     $content = @"
 # Asset Factory
 
-Local, modular asset-production tooling for NullOn.
+Local, modular asset-production tooling for game, prototype and visualization projects.
 
-The project is intentionally developed incrementally. The V0 exists only to test
-whether a local concept-to-3D pipeline can produce a useful FuelTank_T1 candidate
-on the target Windows 11 / RTX 5060 Ti (~8 GiB VRAM) workstation.
+The project is intentionally developed incrementally. AI engines are isolated,
+replaceable and validated independently before integration into the production pipeline.
 
-See `docs/PROJECT_OVERVIEW.md` and `docs/V0_FUELTANK_T1.md`.
+See `docs/PROJECT_OVERVIEW.md`, `docs/ARCHITECTURE.md` and `docs/QA_POLICY.md`.
 "@
     Set-Content -LiteralPath $readmePath -Value $content -Encoding UTF8
     Write-Result "OK" "Created README.md"
@@ -1472,6 +1530,1082 @@ function Invoke-TripoSrCommand {
         }
         "repair"  { Invoke-TripoSrRepair }
         "smoke"   { Invoke-TripoSrSmokeTest }
+    }
+}
+
+
+
+function Get-TrellisPythonInfo {
+    param(
+        [Parameter(Mandatory)][string]$Version
+    )
+
+    $path = Get-PythonPathForVersion -Version $Version
+    if ($path) {
+        return [pscustomobject]@{
+            Installed = $true
+            Version = $Version
+            Path = $path
+        }
+    }
+
+    return [pscustomobject]@{
+        Installed = $false
+        Version = $null
+        Path = $null
+    }
+}
+
+function Ensure-TrellisPython {
+    param(
+        [Parameter(Mandatory)][string]$Version
+    )
+
+    $python = Get-TrellisPythonInfo -Version $Version
+    if ($python.Installed) {
+        Write-Result "OK" "TRELLIS Python $Version available - $($python.Path)"
+        return $python
+    }
+
+    if ($NoInstall) {
+        throw "TRELLIS requires Python $Version for this stage. -NoInstall prevents automatic installation."
+    }
+
+    Install-WingetPackage -Id "Python.Python.$Version" -DisplayName "Python $Version for TRELLIS"
+    Refresh-ProcessPath
+
+    $python = Get-TrellisPythonInfo -Version $Version
+    if (-not $python.Installed) {
+        throw "Python $Version installation completed, but it is still not detectable. Open a new terminal and rerun the TRELLIS command."
+    }
+
+    return $python
+}
+
+function Test-TrellisRepository {
+    if (-not (Test-Path -LiteralPath $TrellisRoot -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "missing"; Origin = $null; Message = "engines\\trellis does not exist" }
+    }
+
+    $gitDir = Join-Path $TrellisRoot ".git"
+    if (-not (Test-Path -LiteralPath $gitDir -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "partial"; Origin = $null; Message = "engines\\trellis exists but is not a Git repository" }
+    }
+
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Git is unavailable" }
+    }
+
+    $originResult = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "remote", "get-url", "origin")
+    if ($originResult.ExitCode -ne 0 -or $originResult.Output.Count -eq 0) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Could not read TRELLIS origin" }
+    }
+
+    $origin = ($originResult.Output | Select-Object -First 1).ToString().Trim()
+    if ((Normalize-GitRemoteUrl $origin) -ne (Normalize-GitRemoteUrl $TrellisRepoUrl)) {
+        return [pscustomobject]@{ Valid = $false; State = "wrong-origin"; Origin = $origin; Message = "Unexpected TRELLIS origin" }
+    }
+
+    $pipelineFile = Join-Path $TrellisRoot "trellis\pipelines\trellis_image_to_3d.py"
+    $setupFile = Join-Path $TrellisRoot "setup.sh"
+
+    if (-not (Test-Path -LiteralPath $pipelineFile -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "TRELLIS image-to-3D pipeline source is missing" }
+    }
+
+    if (-not (Test-Path -LiteralPath $setupFile -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "TRELLIS setup.sh is missing" }
+    }
+
+    return [pscustomobject]@{ Valid = $true; State = "ready"; Origin = $origin; Message = "Official TRELLIS repository present" }
+}
+
+function Get-TrellisGitState {
+    $git = Get-GitInfo
+    if (-not $git.Installed -or -not (Test-Path -LiteralPath (Join-Path $TrellisRoot ".git") -PathType Container)) {
+        return $null
+    }
+
+    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "rev-parse", "--short=7", "HEAD")
+    $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "status", "--porcelain", "--untracked-files=no")
+    $submodule = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "submodule", "status", "trellis/representations/mesh/flexicubes")
+
+    return [pscustomobject]@{
+        Head = if ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0) { $head.Output[0].ToString().Trim() } else { $null }
+        Dirty = ($dirty.ExitCode -ne 0 -or $dirty.Output.Count -gt 0)
+        FlexiCubes = if ($submodule.ExitCode -eq 0 -and $submodule.Output.Count -gt 0) { $submodule.Output[0].ToString().Trim() } else { $null }
+    }
+}
+
+function Ensure-TrellisRepository {
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        throw "Git is required before preparing TRELLIS."
+    }
+
+    $enginesDir = Join-Path $ProjectRoot "engines"
+    if (-not (Test-Path -LiteralPath $enginesDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $enginesDir -Force | Out-Null
+    }
+
+    $state = Test-TrellisRepository
+
+    if ($state.State -eq "missing") {
+        Write-Result "INFO" "Cloning official TRELLIS repository with submodules..."
+        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+            "clone", "--recurse-submodules", $TrellisRepoUrl, $TrellisRoot
+        )
+        if ($clone.ExitCode -ne 0) {
+            throw "Could not clone TRELLIS: $($clone.Output -join ' | ')"
+        }
+        $state = Test-TrellisRepository
+    } elseif ($state.State -eq "partial") {
+        $entries = @(Get-ChildItem -LiteralPath $TrellisRoot -Force -ErrorAction SilentlyContinue)
+        if ($entries.Count -eq 0) {
+            Remove-Item -LiteralPath $TrellisRoot -Force
+            Write-Result "INFO" "Removed empty engines\\trellis placeholder before clone"
+
+            $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+                "clone", "--recurse-submodules", $TrellisRepoUrl, $TrellisRoot
+            )
+            if ($clone.ExitCode -ne 0) {
+                throw "Could not clone TRELLIS: $($clone.Output -join ' | ')"
+            }
+            $state = Test-TrellisRepository
+        } else {
+            $names = ($entries | Select-Object -ExpandProperty Name) -join ", "
+            throw "engines\\trellis is not a Git repository and contains files: $names. Nothing was deleted."
+        }
+    }
+
+    if (-not $state.Valid) {
+        if ($state.State -eq "wrong-origin") {
+            throw "engines\\trellis is a Git repository with unexpected origin '$($state.Origin)'. Nothing was modified."
+        }
+        throw "TRELLIS repository is incomplete or invalid: $($state.Message)"
+    }
+
+    $gitState = Get-TrellisGitState
+    if ($null -eq $gitState) {
+        throw "Could not inspect TRELLIS Git state."
+    }
+
+    if ($gitState.Dirty) {
+        throw "TRELLIS tracked files contain local changes. Refusing to pin the repository automatically."
+    }
+
+    if ($gitState.Head -ne $TrellisPinnedCommit) {
+        Write-Result "INFO" "Pinning TRELLIS to validated commit $TrellisPinnedCommit..."
+        $fetch = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "fetch", "origin")
+        if ($fetch.ExitCode -ne 0) {
+            throw "Could not fetch TRELLIS before pinning: $($fetch.Output -join ' | ')"
+        }
+
+        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "checkout", "--detach", $TrellisPinnedCommit)
+        if ($checkout.ExitCode -ne 0) {
+            throw "Could not checkout TRELLIS commit $TrellisPinnedCommit`: $($checkout.Output -join ' | ')"
+        }
+    }
+
+    $subUpdate = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $TrellisRoot, "submodule", "update", "--init", "--recursive")
+    if ($subUpdate.ExitCode -ne 0) {
+        throw "Could not synchronize TRELLIS submodules: $($subUpdate.Output -join ' | ')"
+    }
+
+    $finalState = Get-TrellisGitState
+    if ($finalState.Head -ne $TrellisPinnedCommit) {
+        throw "TRELLIS pin verification failed. Expected $TrellisPinnedCommit, got '$($finalState.Head)'."
+    }
+    if ([string]::IsNullOrWhiteSpace($finalState.FlexiCubes) -or $finalState.FlexiCubes -notmatch $TrellisPinnedFlexiCubesCommit) {
+        throw "TRELLIS flexicubes submodule does not match expected commit $TrellisPinnedFlexiCubesCommit."
+    }
+
+    Write-Result "OK" "Official TRELLIS repository pinned at $TrellisPinnedCommit"
+}
+
+function Ensure-TrellisVenv {
+    param(
+        [Parameter(Mandatory)][string]$VenvPath,
+        [Parameter(Mandatory)][string]$VenvPython,
+        [Parameter(Mandatory)][string]$PythonVersion,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+        $versionResult = Invoke-NativeCapture -Executable $VenvPython -Arguments @(
+            "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+        )
+        if ($versionResult.ExitCode -eq 0 -and $versionResult.Output.Count -gt 0) {
+            $version = ($versionResult.Output | Select-Object -First 1).ToString().Trim()
+            if ($version -eq $PythonVersion) {
+                Write-Result "OK" "Reusing $Label venv with Python $version"
+                return
+            }
+        }
+
+        if ($NoInstall) {
+            throw "$Label venv exists but is broken or unsupported. -NoInstall prevents recreation."
+        }
+
+        Write-Result "WARN" "$Label venv exists with unsupported/broken Python; recreating only that venv"
+        Remove-Item -LiteralPath $VenvPath -Recurse -Force
+    } elseif (Test-Path -LiteralPath $VenvPath) {
+        if ($NoInstall) {
+            throw "Incomplete $Label venv detected. -NoInstall prevents recreation."
+        }
+        Remove-Item -LiteralPath $VenvPath -Recurse -Force
+    }
+
+    $python = Ensure-TrellisPython -Version $PythonVersion
+    $create = Invoke-NativeCapture -Executable $python.Path -Arguments @("-m", "venv", $VenvPath)
+    if ($create.ExitCode -ne 0) {
+        throw "Could not create $Label venv: $($create.Output -join ' | ')"
+    }
+
+    if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+        throw "$Label venv creation returned success but python.exe is missing."
+    }
+
+    Write-Result "OK" "Created isolated $Label venv"
+}
+
+function Invoke-TrellisPython {
+    param(
+        [Parameter(Mandatory)][string]$PythonPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
+        throw "Requested TRELLIS Python environment is missing: $PythonPath"
+    }
+
+    return Invoke-NativeCapture -Executable $PythonPath -Arguments $Arguments -WorkingDirectory $TrellisRoot
+}
+
+function Ensure-TrellisPackagingTools {
+    param(
+        [Parameter(Mandatory)][string]$PythonPath,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $result = Invoke-TrellisPython -PythonPath $PythonPath -Arguments @(
+        "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"
+    )
+    if ($result.ExitCode -ne 0) {
+        throw "Could not prepare $Label packaging tools: $($result.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "$Label pip/setuptools/wheel ready"
+}
+
+function Get-TrellisRuntimeTorchInfo {
+    if (-not (Test-Path -LiteralPath $TrellisRuntimeVenvPython -PathType Leaf)) {
+        return [pscustomobject]@{
+            Available = $false
+            Torch = $null
+            Cuda = $null
+            CudaAvailable = $false
+            Gpu = $null
+            Arch = $null
+        }
+    }
+
+    $code = @'
+import torch
+print(torch.__version__)
+print(torch.version.cuda or "")
+print(str(torch.cuda.is_available()))
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
+print(",".join(torch.cuda.get_arch_list()) if torch.cuda.is_available() else "")
+'@
+
+    $result = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+    if ($result.ExitCode -ne 0 -or $result.Output.Count -lt 5) {
+        return [pscustomobject]@{
+            Available = $false
+            Torch = $null
+            Cuda = $null
+            CudaAvailable = $false
+            Gpu = $null
+            Arch = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        Available = $true
+        Torch = $result.Output[0].ToString().Trim()
+        Cuda = $result.Output[1].ToString().Trim()
+        CudaAvailable = ($result.Output[2].ToString().Trim() -eq "True")
+        Gpu = $result.Output[3].ToString().Trim()
+        Arch = $result.Output[4].ToString().Trim()
+    }
+}
+
+function Ensure-TrellisRuntimePyTorch {
+    $current = Get-TrellisRuntimeTorchInfo
+    if ($current.Available -and
+        $current.Torch -like "$TrellisTorchVersion*" -and
+        $current.Cuda -eq $TrellisExpectedTorchCuda -and
+        $current.CudaAvailable) {
+        Write-Result "OK" "Reusing TRELLIS runtime PyTorch $($current.Torch) / CUDA $($current.Cuda)"
+        return
+    }
+
+    if ($NoInstall) {
+        throw "TRELLIS runtime PyTorch $TrellisTorchVersion / CUDA $TrellisExpectedTorchCuda is not ready. -NoInstall prevents installation."
+    }
+
+    Write-Result "INFO" "Installing official PyTorch $TrellisTorchVersion CUDA $TrellisExpectedTorchCuda wheels in TRELLIS runtime venv..."
+    $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-m", "pip", "install", "--upgrade",
+        "torch==$TrellisTorchVersion",
+        "torchvision",
+        "--index-url", $TrellisTorchIndexUrl
+    )
+
+    if ($install.ExitCode -ne 0) {
+        throw "TRELLIS runtime PyTorch installation failed: $($install.Output -join ' | ')"
+    }
+
+    $verify = Get-TrellisRuntimeTorchInfo
+    if (-not $verify.Available -or -not $verify.CudaAvailable) {
+        throw "TRELLIS runtime PyTorch installed but CUDA execution is unavailable."
+    }
+    if ($verify.Cuda -ne $TrellisExpectedTorchCuda) {
+        throw "TRELLIS runtime PyTorch reports CUDA '$($verify.Cuda)' instead of expected '$TrellisExpectedTorchCuda'."
+    }
+    if ($verify.Arch -notmatch "sm_120") {
+        throw "TRELLIS runtime PyTorch does not expose sm_120 required by the detected Blackwell GPU. Reported arch list: $($verify.Arch)"
+    }
+
+    Write-Result "OK" "TRELLIS runtime PyTorch $($verify.Torch) / CUDA $($verify.Cuda) / sm_120 validated"
+}
+
+function Ensure-TrellisRuntimeBasicPackages {
+    if ($NoInstall) {
+        Write-Result "INFO" "-NoInstall: skipping TRELLIS runtime package installation."
+        return
+    }
+
+    Write-Result "INFO" "Installing TRELLIS pure-Python/basic runtime dependencies..."
+    $arguments = @("-m", "pip", "install", "--upgrade") + $TrellisBasicPackages
+    $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments $arguments
+    if ($install.ExitCode -ne 0) {
+        throw "TRELLIS basic dependency installation failed: $($install.Output -join ' | ')"
+    }
+
+    $utils3d = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-m", "pip", "install",
+        "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"
+    )
+    if ($utils3d.ExitCode -ne 0) {
+        throw "TRELLIS utils3d installation failed: $($utils3d.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "TRELLIS basic runtime dependencies ready"
+}
+
+function Test-TrellisRuntimeBasicImports {
+    $code = @'
+import importlib
+modules = [
+    "PIL",
+    "imageio",
+    "tqdm",
+    "easydict",
+    "cv2",
+    "scipy",
+    "rembg",
+    "onnxruntime",
+    "trimesh",
+    "xatlas",
+    "transformers",
+    "huggingface_hub",
+    "utils3d",
+]
+failed = []
+for name in modules:
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        failed.append(f"{name}: {exc}")
+if failed:
+    print(" | ".join(failed))
+    raise SystemExit(1)
+print("OK")
+'@
+
+    $probe = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+    if ($probe.ExitCode -ne 0) {
+        throw "TRELLIS basic runtime import probe failed: $($probe.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "TRELLIS basic runtime imports passed"
+}
+
+
+function Get-TrellisSdpaInfo {
+    if (-not (Test-Path -LiteralPath $TrellisRuntimeVenvPython -PathType Leaf)) {
+        return [pscustomobject]@{
+            Available = $false
+            Message = "TRELLIS runtime venv missing"
+        }
+    }
+
+    $code = @'
+import torch
+import torch.nn.functional as F
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA unavailable")
+
+q = torch.randn((1, 8, 128, 64), device="cuda", dtype=torch.float16)
+k = torch.randn((1, 8, 128, 64), device="cuda", dtype=torch.float16)
+v = torch.randn((1, 8, 128, 64), device="cuda", dtype=torch.float16)
+
+with torch.backends.cuda.sdp_kernel(
+    enable_flash=True,
+    enable_math=True,
+    enable_mem_efficient=True,
+    enable_cudnn=True,
+):
+    out = F.scaled_dot_product_attention(q, k, v)
+
+torch.cuda.synchronize()
+
+print(torch.__version__)
+print(torch.version.cuda or "")
+print(torch.cuda.get_device_name(0))
+print(",".join(torch.cuda.get_arch_list()))
+print(str(out.shape))
+print("SDPA_CUDA_OK")
+'@
+
+    $probe = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+
+    if ($probe.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            Available = $false
+            Message = ($probe.Output -join " | ")
+        }
+    }
+
+    return [pscustomobject]@{
+        Available = ($probe.Output -contains "SDPA_CUDA_OK")
+        Message = ($probe.Output -join " | ")
+    }
+}
+
+function Test-TrellisSdpa {
+    $sdpa = Get-TrellisSdpaInfo
+    if (-not $sdpa.Available) {
+        throw "PyTorch SDPA CUDA validation failed: $($sdpa.Message)"
+    }
+
+    Write-Result "OK" "PyTorch SDPA CUDA attention passed on the TRELLIS runtime"
+}
+
+function Get-TrellisXFormersInfo {
+    if (-not (Test-Path -LiteralPath $TrellisRuntimeVenvPython -PathType Leaf)) {
+        return [pscustomobject]@{
+            Installed = $false
+            Version = $null
+            CudaKernel = $false
+            Message = "TRELLIS runtime venv missing"
+        }
+    }
+
+    $code = @'
+try:
+    import xformers
+    version = getattr(xformers, "__version__", "unknown")
+    print(version)
+except Exception as exc:
+    print(type(exc).__name__ + ": " + str(exc))
+    raise SystemExit(2)
+
+try:
+    import torch
+    import xformers.ops as xops
+
+    q = torch.randn((1, 32, 4, 64), device="cuda", dtype=torch.float16)
+    k = torch.randn((1, 32, 4, 64), device="cuda", dtype=torch.float16)
+    v = torch.randn((1, 32, 4, 64), device="cuda", dtype=torch.float16)
+    out = xops.memory_efficient_attention(q, k, v)
+    torch.cuda.synchronize()
+    print("XFORMERS_CUDA_OK")
+except Exception as exc:
+    print(type(exc).__name__ + ": " + str(exc))
+    raise SystemExit(1)
+'@
+
+    $probe = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+
+    if ($probe.ExitCode -eq 2) {
+        return [pscustomobject]@{
+            Installed = $false
+            Version = $null
+            CudaKernel = $false
+            Message = ($probe.Output -join " | ")
+        }
+    }
+
+    $version = if ($probe.Output.Count -gt 0) { $probe.Output[0].ToString().Trim() } else { $null }
+
+    return [pscustomobject]@{
+        Installed = $true
+        Version = $version
+        CudaKernel = ($probe.ExitCode -eq 0 -and ($probe.Output -contains "XFORMERS_CUDA_OK"))
+        Message = ($probe.Output -join " | ")
+    }
+}
+
+function Remove-TrellisBrokenXFormers {
+    $info = Get-TrellisXFormersInfo
+    if (-not $info.Installed) {
+        return
+    }
+
+    if ($info.CudaKernel) {
+        Write-Result "INFO" "xformers $($info.Version) works, but Asset Factory still prefers PyTorch SDPA on this Blackwell runtime."
+        return
+    }
+
+    if ($NoInstall) {
+        Write-Result "WARN" "xformers $($info.Version) is installed but incompatible with the current Blackwell runtime; -NoInstall prevents removing it."
+        return
+    }
+
+    Write-Result "WARN" "xformers $($info.Version) is incompatible with this Blackwell stack; removing it to avoid accidental backend selection."
+    $uninstall = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-m", "pip", "uninstall", "-y", "xformers"
+    )
+    if ($uninstall.ExitCode -ne 0) {
+        throw "Could not remove incompatible xformers: $($uninstall.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "Incompatible xformers removed"
+}
+
+function Get-TrellisNativeToolchainInfo {
+    $vs = Get-Vs2022CppToolchainInfo
+
+    $cudaRoot = Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA\v13.4"
+    $nvcc = Join-Path $cudaRoot "bin\nvcc.exe"
+
+    $cudaPresent = Test-Path -LiteralPath $nvcc -PathType Leaf
+    $nvccVersion = $null
+
+    if ($cudaPresent) {
+        try {
+            $probe = Invoke-NativeCapture -Executable $nvcc -Arguments @("--version")
+            if ($probe.ExitCode -eq 0) {
+                $joined = $probe.Output -join "`n"
+                $m = [regex]::Match($joined, 'release\s+(\d+\.\d+)')
+                if ($m.Success) {
+                    $nvccVersion = $m.Groups[1].Value
+                }
+            }
+        } catch {}
+    }
+
+    $props = $null
+    $targets = $null
+    $integrationValid = $false
+
+    if ($vs.Installed) {
+        $buildCustomizations = Join-Path $vs.Root "MSBuild\Microsoft\VC\v170\BuildCustomizations"
+        $props = Join-Path $buildCustomizations "CUDA 13.4.props"
+        $targets = Join-Path $buildCustomizations "CUDA 13.4.targets"
+        $integrationValid = (
+            (Test-Path -LiteralPath $props -PathType Leaf) -and
+            (Test-Path -LiteralPath $targets -PathType Leaf)
+        )
+    }
+
+    return [pscustomobject]@{
+        CudaPresent = $cudaPresent
+        CudaRoot = $cudaRoot
+        NvccPath = $nvcc
+        NvccVersion = $nvccVersion
+        VsInstalled = $vs.Installed
+        VsRoot = $vs.Root
+        MsvcToolset = $vs.Toolset
+        ClPath = $vs.ClPath
+        PropsPath = $props
+        TargetsPath = $targets
+        IntegrationValid = $integrationValid
+    }
+}
+
+function Assert-TrellisNativeToolchain {
+    $info = Get-TrellisNativeToolchainInfo
+
+    if (-not $info.CudaPresent) {
+        throw "CUDA Toolkit 13.4 is required for TRELLIS native extensions."
+    }
+
+    if ($info.NvccVersion -ne "13.4") {
+        throw "TRELLIS native nvcc version mismatch. Expected 13.4, detected '$($info.NvccVersion)'."
+    }
+
+    if (-not $info.VsInstalled) {
+        throw "Visual Studio 2022 C++ Build Tools are required for TRELLIS native extensions."
+    }
+
+    if (-not $info.IntegrationValid) {
+        throw "CUDA 13.4 Visual Studio integration is incomplete."
+    }
+
+    Write-Result "OK" "CUDA Toolkit $($info.NvccVersion) - $($info.NvccPath)"
+    Write-Result "OK" "VS2022 C++ / MSVC $($info.MsvcToolset) - $($info.ClPath)"
+    Write-Result "OK" "CUDA 13.4 MSBuild integration present"
+
+    return $info
+}
+
+function Invoke-TrellisNativeCompileTest {
+    param([switch]$Quiet)
+
+    $toolchain = Assert-TrellisNativeToolchain
+
+    $testDir = Join-Path $ProjectRoot "outputs\trellis-native-toolchain"
+    if (-not (Test-Path -LiteralPath $testDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $testDir -Force | Out-Null
+    }
+
+    $sourcePath = Join-Path $testDir "sm120-test.cu"
+    $objectPath = Join-Path $testDir "sm120-test.obj"
+
+    @'
+__global__ void asset_factory_trellis_test_kernel() {}
+
+int main()
+{
+    asset_factory_trellis_test_kernel<<<1, 1>>>();
+    return 0;
+}
+'@ | Set-Content -LiteralPath $sourcePath -Encoding ASCII
+
+    if (Test-Path -LiteralPath $objectPath -PathType Leaf) {
+        Remove-Item -LiteralPath $objectPath -Force
+    }
+
+    $clDir = Split-Path -Parent $toolchain.ClPath
+    $compile = Invoke-NativeCapture -Executable $toolchain.NvccPath -Arguments @(
+        "-arch=sm_120",
+        "-ccbin", $clDir,
+        "-c", $sourcePath,
+        "-o", $objectPath
+    )
+
+    if ($compile.ExitCode -ne 0) {
+        throw "CUDA/MSVC sm_120 compile test failed: $($compile.Output -join ' | ')"
+    }
+
+    if (-not (Test-Path -LiteralPath $objectPath -PathType Leaf)) {
+        throw "CUDA/MSVC compile returned success but did not produce $objectPath"
+    }
+
+    if (-not $Quiet) {
+        Write-Result "OK" "CUDA/MSVC compile test passed for sm_120"
+        Write-Result "INFO" "Toolchain test object: $objectPath"
+    }
+
+    return $objectPath
+}
+
+function Show-TrellisNativeStatus {
+    Write-Header "TRELLIS Native Status"
+
+    $toolchain = Get-TrellisNativeToolchainInfo
+
+    if ($toolchain.CudaPresent) {
+        Write-Result "OK" "CUDA Toolkit $($toolchain.NvccVersion) - $($toolchain.NvccPath)"
+    } else {
+        Write-Result "MISSING" "CUDA Toolkit 13.4"
+    }
+
+    if ($toolchain.VsInstalled) {
+        Write-Result "OK" "MSVC $($toolchain.MsvcToolset) - $($toolchain.ClPath)"
+    } else {
+        Write-Result "MISSING" "Visual Studio 2022 C++ Build Tools"
+    }
+
+    if ($toolchain.IntegrationValid) {
+        Write-Result "OK" "CUDA 13.4 Visual Studio integration"
+    } else {
+        Write-Result "MISSING" "CUDA 13.4 Visual Studio integration"
+    }
+
+    $sdpa = Get-TrellisSdpaInfo
+    if ($sdpa.Available) {
+        Write-Result "OK" "PyTorch SDPA CUDA attention backend"
+    } else {
+        Write-Result "FAIL" "PyTorch SDPA CUDA attention unavailable: $($sdpa.Message)"
+    }
+
+    $xformers = Get-TrellisXFormersInfo
+    if (-not $xformers.Installed) {
+        Write-Result "OK" "xformers not installed; SDPA is the selected backend"
+    } elseif ($xformers.CudaKernel) {
+        Write-Result "INFO" "xformers $($xformers.Version) is available but optional"
+    } else {
+        Write-Result "WARN" "xformers $($xformers.Version) is installed but incompatible with this Blackwell stack"
+    }
+
+    Write-Result "INFO" "Selected attention backend: $TrellisAttentionBackend"
+    Write-Result "INFO" "Remaining TRELLIS native rendering/sparse-convolution extensions are handled in the next stage."
+}
+
+function Invoke-TrellisNativeInstall {
+    Write-Header "TRELLIS Native Install - AF-08C Stage 1"
+    Assert-BootstrapHost
+
+    $runtimeExit = Invoke-TrellisRuntimeDoctor
+    if ($runtimeExit -ne 0) {
+        throw "TRELLIS native installation aborted because runtime doctor failed."
+    }
+
+    $null = Assert-TrellisNativeToolchain
+    $null = Invoke-TrellisNativeCompileTest
+    Test-TrellisSdpa
+    Remove-TrellisBrokenXFormers
+
+    Write-Result "OK" "TRELLIS AF-08C native stage 1 validated"
+    Write-Result "INFO" "Attention backend: PyTorch SDPA CUDA"
+    Write-Result "INFO" "xformers is optional and is removed automatically when its CUDA kernels do not support the detected Blackwell GPU."
+}
+
+function Invoke-TrellisNativeDoctor {
+    Write-Header "TRELLIS Native Doctor"
+    $failures = 0
+
+    try {
+        $runtimeExit = Invoke-TrellisRuntimeDoctor
+        if ($runtimeExit -ne 0) {
+            $failures++
+        }
+    } catch {
+        Write-Result "FAIL" $_.Exception.Message
+        $failures++
+    }
+
+    try {
+        $null = Assert-TrellisNativeToolchain
+    } catch {
+        Write-Result "FAIL" $_.Exception.Message
+        $failures++
+    }
+
+    if ($failures -eq 0) {
+        try {
+            $null = Invoke-TrellisNativeCompileTest -Quiet
+            Write-Result "OK" "CUDA/MSVC compile test passed for sm_120"
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    if ($failures -eq 0) {
+        try {
+            Test-TrellisSdpa
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    $xformers = Get-TrellisXFormersInfo
+    if ($xformers.Installed -and -not $xformers.CudaKernel) {
+        Write-Result "WARN" "xformers $($xformers.Version) is incompatible with this Blackwell runtime; SDPA remains the supported backend."
+    } elseif ($xformers.Installed -and $xformers.CudaKernel) {
+        Write-Result "INFO" "xformers $($xformers.Version) also works, but SDPA remains selected."
+    } else {
+        Write-Result "OK" "xformers absent; no incompatible attention backend can be selected accidentally."
+    }
+
+    if ($failures -gt 0) {
+        Write-Result "FAIL" "TRELLIS native doctor found $failures blocking issue(s)."
+        return 1
+    }
+
+    Write-Result "OK" "TRELLIS AF-08C native stage 1 is healthy."
+    Write-Result "INFO" "Selected attention backend: PyTorch SDPA CUDA"
+    return 0
+}
+
+
+function Show-TrellisStatus {
+    Write-Header "TRELLIS Status"
+
+    $repo = Test-TrellisRepository
+    if ($repo.Valid) {
+        Write-Result "OK" "Repository: $($repo.Origin)"
+        $gitState = Get-TrellisGitState
+        if ($null -ne $gitState) {
+            Write-Result "INFO" "Repository HEAD: $($gitState.Head) / pinned: $TrellisPinnedCommit"
+            Write-Result "INFO" "FlexiCubes: $($gitState.FlexiCubes)"
+        }
+    } elseif ($repo.State -eq "missing") {
+        Write-Result "MISSING" "TRELLIS repository not prepared"
+    } else {
+        Write-Result "WARN" "TRELLIS repository state: $($repo.Message)"
+    }
+
+    if (Test-Path -LiteralPath $TrellisBootstrapVenvPython -PathType Leaf) {
+        $version = Invoke-NativeCapture -Executable $TrellisBootstrapVenvPython -Arguments @("--version")
+        if ($version.ExitCode -eq 0) {
+            Write-Result "OK" "Bootstrap venv: $($version.Output[0])"
+        }
+    } else {
+        Write-Result "MISSING" "TRELLIS bootstrap venv"
+    }
+
+    $gpu = Get-NvidiaInfo
+    if ($gpu.Available) {
+        $vramGiB = [math]::Round($gpu.VramMiB / 1024.0, 2)
+        Write-Result "OK" "GPU: $($gpu.Name), driver $($gpu.DriverVersion), VRAM $vramGiB GiB"
+        if ($gpu.VramMiB -lt 15360) {
+            Write-Result "WARN" "Below upstream TRELLIS' official 16 GiB target; Asset Factory low-VRAM/offload execution is required."
+        }
+    } else {
+        Write-Result "MISSING" "NVIDIA GPU information unavailable"
+    }
+
+    Write-Result "INFO" "Use 'trellis runtime-status' for the AF-08B runtime."
+}
+
+function Show-TrellisRuntimeStatus {
+    Write-Header "TRELLIS Runtime Status"
+
+    if (Test-Path -LiteralPath $TrellisRuntimeVenvPython -PathType Leaf) {
+        $version = Invoke-NativeCapture -Executable $TrellisRuntimeVenvPython -Arguments @("--version")
+        if ($version.ExitCode -eq 0 -and $version.Output.Count -gt 0) {
+            Write-Result "OK" "Runtime venv: $($version.Output[0])"
+        } else {
+            Write-Result "WARN" "Runtime venv exists but Python does not run"
+        }
+    } else {
+        Write-Result "MISSING" "TRELLIS runtime venv"
+    }
+
+    $torch = Get-TrellisRuntimeTorchInfo
+    if ($torch.Available) {
+        Write-Result "OK" "PyTorch $($torch.Torch) / CUDA $($torch.Cuda) / cuda_available=$($torch.CudaAvailable)"
+        Write-Result "OK" "GPU: $($torch.Gpu)"
+        Write-Result "INFO" "Torch architectures: $($torch.Arch)"
+    } else {
+        Write-Result "MISSING" "TRELLIS runtime PyTorch not ready"
+    }
+
+    Write-Result "INFO" "Native TRELLIS CUDA extensions: deferred to AF-08C"
+    Write-Result "INFO" "Inference/model download: not enabled yet"
+}
+
+function Invoke-TrellisInstall {
+    Write-Header "TRELLIS Bootstrap Install"
+    Assert-BootstrapHost
+
+    if ($NoInstall) {
+        $doctorExit = Invoke-TrellisDoctor
+        if ($doctorExit -ne 0) {
+            throw "TRELLIS bootstrap validation failed while -NoInstall was active."
+        }
+        return
+    }
+
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        Install-WingetPackage -Id "Git.Git" -DisplayName "Git"
+    }
+
+    $gpu = Get-NvidiaInfo
+    if (-not $gpu.Available) {
+        throw "NVIDIA GPU is not detectable with nvidia-smi."
+    }
+
+    Ensure-TrellisRepository
+    Ensure-TrellisVenv -VenvPath $TrellisBootstrapVenv -VenvPython $TrellisBootstrapVenvPython -PythonVersion $TrellisBootstrapPythonVersion -Label "TRELLIS bootstrap"
+    Ensure-TrellisPackagingTools -PythonPath $TrellisBootstrapVenvPython -Label "TRELLIS bootstrap"
+
+    Write-Result "OK" "TRELLIS AF-08A bootstrap prepared"
+}
+
+function Invoke-TrellisDoctor {
+    Write-Header "TRELLIS Bootstrap Doctor"
+    $failures = 0
+
+    $repo = Test-TrellisRepository
+    if ($repo.Valid) {
+        Write-Result "OK" "Official TRELLIS repository valid"
+        $gitState = Get-TrellisGitState
+        if ($null -eq $gitState -or $gitState.Head -ne $TrellisPinnedCommit) {
+            Write-Result "FAIL" "TRELLIS HEAD is not pinned to $TrellisPinnedCommit"
+            $failures++
+        } else {
+            Write-Result "OK" "TRELLIS pinned commit $TrellisPinnedCommit"
+        }
+    } else {
+        Write-Result "FAIL" "Repository: $($repo.Message)"
+        $failures++
+    }
+
+    if (Test-Path -LiteralPath $TrellisBootstrapVenvPython -PathType Leaf) {
+        Write-Result "OK" "TRELLIS bootstrap venv present"
+    } else {
+        Write-Result "FAIL" "TRELLIS bootstrap venv missing"
+        $failures++
+    }
+
+    $gpu = Get-NvidiaInfo
+    if ($gpu.Available) {
+        $vramGiB = [math]::Round($gpu.VramMiB / 1024.0, 2)
+        Write-Result "OK" "NVIDIA GPU detected: $($gpu.Name), $vramGiB GiB VRAM"
+        if ($gpu.VramMiB -lt 15360) {
+            Write-Result "WARN" "GPU is below upstream TRELLIS' official 16 GiB requirement; low-VRAM/offload execution is mandatory."
+        }
+    } else {
+        Write-Result "FAIL" "NVIDIA GPU is not detectable with nvidia-smi."
+        $failures++
+    }
+
+    if ($failures -gt 0) {
+        Write-Result "FAIL" "TRELLIS bootstrap doctor found $failures blocking issue(s)."
+        return 1
+    }
+
+    Write-Result "OK" "TRELLIS AF-08A bootstrap is ready."
+    return 0
+}
+
+function Invoke-TrellisRuntimeInstall {
+    Write-Header "TRELLIS Runtime Install"
+    Assert-BootstrapHost
+
+    $bootstrapExit = Invoke-TrellisDoctor
+    if ($bootstrapExit -ne 0) {
+        throw "TRELLIS runtime installation aborted because the bootstrap doctor failed."
+    }
+
+    Ensure-TrellisVenv -VenvPath $TrellisRuntimeVenv -VenvPython $TrellisRuntimeVenvPython -PythonVersion $TrellisRuntimePythonVersion -Label "TRELLIS runtime"
+    Ensure-TrellisPackagingTools -PythonPath $TrellisRuntimeVenvPython -Label "TRELLIS runtime"
+    Ensure-TrellisRuntimePyTorch
+    Ensure-TrellisRuntimeBasicPackages
+    Test-TrellisRuntimeBasicImports
+
+    Write-Result "OK" "TRELLIS AF-08B runtime foundation validated"
+    Write-Result "INFO" "PyTorch CUDA 13 is isolated inside .venv-runtime; system CUDA Toolkit 12.8 was not modified."
+    Write-Result "INFO" "No third-party installer or paid package was used."
+    Write-Result "INFO" "Native TRELLIS CUDA extensions are intentionally deferred to AF-08C."
+}
+
+function Invoke-TrellisRuntimeDoctor {
+    Write-Header "TRELLIS Runtime Doctor"
+    $failures = 0
+
+    if (-not (Test-Path -LiteralPath $TrellisRuntimeVenvPython -PathType Leaf)) {
+        Write-Result "FAIL" "TRELLIS runtime venv missing"
+        $failures++
+    } else {
+        $version = Invoke-NativeCapture -Executable $TrellisRuntimeVenvPython -Arguments @(
+            "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+        )
+        if ($version.ExitCode -eq 0 -and $version.Output.Count -gt 0 -and $version.Output[0].ToString().Trim() -eq $TrellisRuntimePythonVersion) {
+            Write-Result "OK" "TRELLIS runtime Python $TrellisRuntimePythonVersion"
+        } else {
+            Write-Result "FAIL" "TRELLIS runtime does not use a working Python $TrellisRuntimePythonVersion"
+            $failures++
+        }
+    }
+
+    if ($failures -eq 0) {
+        $torch = Get-TrellisRuntimeTorchInfo
+        if (-not $torch.Available) {
+            Write-Result "FAIL" "TRELLIS runtime PyTorch is not importable"
+            $failures++
+        } else {
+            Write-Result "OK" "PyTorch $($torch.Torch)"
+            Write-Result "OK" "PyTorch CUDA $($torch.Cuda)"
+            Write-Result "OK" "CUDA available: $($torch.CudaAvailable)"
+            Write-Result "OK" "GPU: $($torch.Gpu)"
+            Write-Result "INFO" "Torch architectures: $($torch.Arch)"
+
+            if ($torch.Cuda -ne $TrellisExpectedTorchCuda) {
+                Write-Result "FAIL" "Expected PyTorch CUDA $TrellisExpectedTorchCuda"
+                $failures++
+            }
+            if (-not $torch.CudaAvailable) {
+                Write-Result "FAIL" "CUDA execution unavailable"
+                $failures++
+            }
+            if ($torch.Arch -notmatch "sm_120") {
+                Write-Result "FAIL" "sm_120 is absent from the PyTorch architecture list"
+                $failures++
+            }
+        }
+    }
+
+    if ($failures -eq 0) {
+        try {
+            Test-TrellisRuntimeBasicImports
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    if ($failures -gt 0) {
+        Write-Result "FAIL" "TRELLIS runtime doctor found $failures blocking issue(s)."
+        return 1
+    }
+
+    Write-Result "OK" "TRELLIS AF-08B runtime foundation is healthy."
+    Write-Result "INFO" "This still does not certify image-to-3D inference; native CUDA extensions come next."
+    return 0
+}
+
+function Invoke-TrellisRepair {
+    Write-Header "TRELLIS Repair"
+    Ensure-TrellisRepository
+    Ensure-TrellisVenv -VenvPath $TrellisBootstrapVenv -VenvPython $TrellisBootstrapVenvPython -PythonVersion $TrellisBootstrapPythonVersion -Label "TRELLIS bootstrap"
+    Ensure-TrellisPackagingTools -PythonPath $TrellisBootstrapVenvPython -Label "TRELLIS bootstrap"
+    Write-Result "OK" "TRELLIS bootstrap repaired"
+}
+
+function Invoke-TrellisSmokeTest {
+    Write-Header "TRELLIS Smoke Test"
+    Write-Result "WARN" "TRELLIS inference smoke is not enabled yet."
+    Write-Result "INFO" "AF-08C must validate native CUDA extensions before model download and PNG-to-GLB inference."
+}
+
+function Invoke-TrellisCommand {
+    switch ($EngineCommand) {
+        "install"         { Invoke-TrellisInstall }
+        "status"          { Show-TrellisStatus }
+        "doctor"          {
+            $exitCode = Invoke-TrellisDoctor
+            if ($exitCode -ne 0) { exit $exitCode }
+        }
+        "repair"          { Invoke-TrellisRepair }
+        "smoke"           { Invoke-TrellisSmokeTest }
+        "runtime-install" { Invoke-TrellisRuntimeInstall }
+        "runtime-status"  { Show-TrellisRuntimeStatus }
+        "runtime-doctor"  {
+            $exitCode = Invoke-TrellisRuntimeDoctor
+            if ($exitCode -ne 0) { exit $exitCode }
+        }
+        "native-install"  { Invoke-TrellisNativeInstall }
+        "native-status"   { Show-TrellisNativeStatus }
+        "native-doctor"   {
+            $exitCode = Invoke-TrellisNativeDoctor
+            if ($exitCode -ne 0) { exit $exitCode }
+        }
+        "model-install" {
+            Write-Result "WARN" "TRELLIS model-install is not enabled yet; model download follows native runtime validation."
+        }
     }
 }
 
@@ -2513,6 +3647,15 @@ function Show-Status {
         Write-Result "WARN" "TripoSR repository state: $($tripoRepoState.Message)"
     }
 
+    $trellisRepoState = Test-TrellisRepository
+    if ($trellisRepoState.Valid) {
+        Write-Result "OK" "TRELLIS repository installed"
+    } elseif ($trellisRepoState.State -eq "missing") {
+        Write-Result "INFO" "TRELLIS not installed; run .\setup-asset-factory.ps1 trellis install"
+    } else {
+        Write-Result "WARN" "TRELLIS repository state: $($trellisRepoState.Message)"
+    }
+
     $comfyRepoState = Test-ComfyUiRepository
     if ($comfyRepoState.Valid) {
         Write-Result "OK" "ComfyUI repository installed"
@@ -2585,7 +3728,8 @@ function Invoke-Install {
 
     Write-Result "INFO" "TripoSR remains an opt-in engine install: .\setup-asset-factory.ps1 triposr install"
     Write-Result "INFO" "ComfyUI remains an opt-in engine install: .\setup-asset-factory.ps1 comfyui install"
-    Write-Result "INFO" "Each AI engine uses its own isolated, pinned Python/Torch/CUDA environment."
+    Write-Result "INFO" "TRELLIS remains opt-in: .\setup-asset-factory.ps1 trellis install"
+    Write-Result "INFO" "Each AI engine uses its own isolated Python environment."
 
     Show-Status
 }
@@ -2717,6 +3861,17 @@ Usage:
   .\setup-asset-factory.ps1 comfyui smoke
   .\setup-asset-factory.ps1 comfyui repair
   .\setup-asset-factory.ps1 comfyui model-install
+  .\setup-asset-factory.ps1 trellis install
+  .\setup-asset-factory.ps1 trellis status
+  .\setup-asset-factory.ps1 trellis doctor
+  .\setup-asset-factory.ps1 trellis runtime-install
+  .\setup-asset-factory.ps1 trellis runtime-status
+  .\setup-asset-factory.ps1 trellis runtime-doctor
+  .\setup-asset-factory.ps1 trellis native-install
+  .\setup-asset-factory.ps1 trellis native-status
+  .\setup-asset-factory.ps1 trellis native-doctor
+  .\setup-asset-factory.ps1 trellis repair
+  .\setup-asset-factory.ps1 trellis smoke
   .\setup-asset-factory.ps1 help
 
 Commands:
@@ -2726,6 +3881,9 @@ Commands:
   doctor    Run smoke tests for Git, Python, Blender headless, GPU query and repository structure.
   triposr   Manage the isolated TripoSR engine. Subcommands: install, status, doctor, repair, smoke.
   comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair, model-install.
+  trellis   Manage TRELLIS v1. AF-08A handles the pinned official repo/bootstrap venv;
+            AF-08B runtime-* handles the isolated Python 3.12 / PyTorch CUDA 13 runtime foundation;
+            AF-08C native-* validates CUDA/MSVC/sm_120 and uses PyTorch SDPA on Blackwell.
   help      Show this help.
 
 Options:
@@ -2736,6 +3894,10 @@ Important:
   - TripoSR is opt-in: use `triposr install`; it never installs packages into global Python.
   - ComfyUI is opt-in: use `comfyui install`; it uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
   - The FLUX Schnell checkpoint is opt-in: use `comfyui model-install`; an existing valid checkpoint is reused.
+  - TRELLIS v1 is pinned to a validated source revision and uses separate bootstrap/runtime venvs.
+  - TRELLIS runtime PyTorch CUDA 13 is isolated; the system CUDA Toolkit used by other engines is not replaced.
+  - AF-08C uses PyTorch SDPA as the default attention backend on Blackwell. xformers is optional and removed if its CUDA kernels are incompatible.
+  - Remaining TRELLIS native extensions and model weights remain staged until their Windows/Blackwell compatibility is validated.
   - Engine repositories, venvs, downloaded models and generated outputs are local runtime data, not repository source.
   - Each AI engine uses an isolated Python environment.
   - Heavy GPU workloads must remain sequential on the ~8 GiB target GPU.
@@ -2754,6 +3916,7 @@ try {
         }
         "triposr" { Invoke-TripoSrCommand }
         "comfyui" { Invoke-ComfyUiCommand }
+        "trellis" { Invoke-TrellisCommand }
         "help"    { Show-Help }
     }
 } catch {

@@ -21,3 +21,4 @@ engines/comfyui/
 
 profiles/*.json
 !profiles/unreal.example.json
+engines/trellis/
