@@ -2,8 +2,6 @@
 
 Asset Factory est une chaîne locale, modulaire et reproductible de génération et de préparation d’assets 3D.
 
-Le projet est conçu pour être réutilisable dans différents jeux, prototypes, outils de visualisation ou pipelines de production. Les paramètres artistiques, dimensions, conventions d’export et destinations finales doivent pouvoir être adaptés au projet consommateur sans modifier l’architecture générale de la factory.
-
 ## Objectifs
 
 Le pipeline actuellement validé permet de chaîner :
@@ -26,8 +24,6 @@ Les composants actuellement utilisés sont :
 - Blender pour le post-traitement et l’export des meshes ;
 - PowerShell pour le bootstrap et l’orchestration ;
 - des environnements Python isolés pour les moteurs IA.
-
-Les moteurs et modèles restent remplaçables : Asset Factory doit conserver une séparation claire entre orchestration, moteurs, workflows, données d’entrée et sorties.
 
 ---
 
@@ -71,9 +67,6 @@ AssetFactory/
 ├─ setup-asset-factory.ps1
 └─ README.md
 ```
-
-Les moteurs IA, leurs environnements virtuels, les modèles téléchargés et les contenus générés sont des données locales d’exécution et ne sont pas versionnés.
-
 ---
 
 # Installation
@@ -338,7 +331,6 @@ Les métadonnées du batch sont stockées sous :
 outputs\batches\<batch-id>\
 ```
 
-Le format des manifests pourra évoluer pour porter des paramètres spécifiques à chaque asset : dimensions cibles, catégorie, règles d’export, profil artistique ou destination.
 
 ---
 
@@ -439,57 +431,4 @@ Smoke test ComfyUI :
 ```powershell
 .\setup-asset-factory.ps1 comfyui smoke
 ```
-
 ---
-
-# Politique Git
-
-Les éléments suivants sont volontairement exclus du dépôt :
-
-- dépôts locaux des moteurs IA ;
-- environnements virtuels Python ;
-- checkpoints de modèles ;
-- contenus générés ;
-- caches ;
-- logs temporaires.
-
-Le dépôt versionne uniquement ce qui est nécessaire pour reconstruire et piloter la factory :
-
-- bootstrap ;
-- scripts d’orchestration ;
-- scripts de post-traitement ;
-- workflows de référence ;
-- manifests d’exemple ;
-- documentation ;
-- configuration reproductible.
-
----
-
-# État actuel
-
-Fonctionnalités déjà validées :
-
-- bootstrap partagé ;
-- détection et exécution headless de Blender ;
-- installation isolée de TripoSR ;
-- exécution image vers 3D avec TripoSR ;
-- installation isolée de ComfyUI ;
-- API ComfyUI ;
-- génération automatisée prompt vers image ;
-- génération d’images par lots ;
-- pipeline prompt vers mesh 3D ;
-- post-traitement Blender ;
-- recalcul des normales ;
-- centrage et placement de la base ;
-- mise à l’échelle configurable ;
-- export OBJ ;
-- export FBX ;
-- métadonnées par job, batch et pipeline.
-
-Travail restant avant de considérer l’installation reproductible comme validée :
-
-- tester l’installation depuis un clone propre ;
-- vérifier l’installation automatique du modèle d’image ;
-- documenter les prérequis réellement nécessaires ;
-- durcir les vérifications de portabilité ;
-- finaliser les profils de sortie et d’intégration vers les projets consommateurs.
