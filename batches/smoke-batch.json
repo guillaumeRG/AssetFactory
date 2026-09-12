@@ -1,0 +1,17 @@
+{
+  "batchId": "smoke-batch",
+  "assets": [
+    {
+      "id": "crate_a",
+      "prompt": "small sci-fi cargo container, hard surface design, clean silhouette, neutral studio background",
+      "negativePrompt": "",
+      "seed": 1234
+    },
+    {
+      "id": "crate_b",
+      "prompt": "compact industrial sci-fi storage crate, reinforced corners, clean silhouette, neutral studio background",
+      "negativePrompt": "",
+      "seed": 5678
+    }
+  ]
+}

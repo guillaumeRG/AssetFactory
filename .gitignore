@@ -14,3 +14,7 @@ models/
 cache/
 *.log
 *.tmp
+
+# Locally installed engines
+engines/triposr/
+engines/comfyui/

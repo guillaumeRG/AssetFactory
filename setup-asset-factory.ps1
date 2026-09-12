@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "status", "doctor", "triposr", "help")]
+    [ValidateSet("install", "status", "doctor", "triposr", "comfyui", "help")]
     [string]$Command = "help",
 
     [Parameter(Position = 1)]
+    [Alias("TriposrCommand", "ComfyUiCommand")]
     [ValidateSet("install", "status", "doctor", "repair", "smoke")]
-    [string]$TriposrCommand = "status",
+    [string]$EngineCommand = "status",
 
     [switch]$NoInstall
 )
@@ -14,7 +15,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "0.4.3"
+$ScriptVersion = "0.5.2"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $MinimumPowerShellVersion = [version]"5.1"
 $Script:HadWarnings = $false
@@ -26,6 +27,8 @@ $RequiredDirs = @(
     "jobs",
     "outputs",
     "tools",
+    "workflows",
+    "batches",
     "docs"
 )
 
@@ -37,6 +40,22 @@ $TripoSrVenv = Join-Path $TripoSrRoot ".venv"
 $TripoSrVenvPython = Join-Path $TripoSrVenv "Scripts\python.exe"
 $TripoSrRequirements = Join-Path $TripoSrRoot "requirements.txt"
 $TripoSrPreferredPythonVersions = @("3.11", "3.10")
+
+# ComfyUI engine configuration. Runtime repository, venv and models stay local.
+$ComfyUiRepoUrl = "https://github.com/Comfy-Org/ComfyUI.git"
+$ComfyUiPinnedRef = "v0.35.0"
+$ComfyUiExpectedVersion = "0.35.0"
+$ComfyUiRoot = Join-Path $ProjectRoot "engines\comfyui"
+$ComfyUiVenv = Join-Path $ComfyUiRoot ".venv"
+$ComfyUiVenvPython = Join-Path $ComfyUiVenv "Scripts\python.exe"
+$ComfyUiRequirements = Join-Path $ComfyUiRoot "requirements.txt"
+$ComfyUiMain = Join-Path $ComfyUiRoot "main.py"
+$ComfyUiPreferredPythonVersion = "3.11"
+$ComfyUiTorchIndexUrl = "https://download.pytorch.org/whl/cu130"
+$ComfyUiExpectedTorchCuda = "13.0"
+$ComfyUiSmokeHost = "127.0.0.1"
+$ComfyUiSmokeTimeoutSeconds = 180
+
 
 function Write-Header {
     param([Parameter(Mandatory)][string]$Title)
@@ -472,6 +491,7 @@ function Ensure-GitIgnore {
         "models/",
         "cache/",
         "engines/triposr/",
+        "engines/comfyui/",
         "*.log",
         "*.tmp"
     )
@@ -712,6 +732,93 @@ function Get-CudaToolkitInfo {
     }
 }
 
+function Get-Vs2022CppToolchainInfo {
+    $roots = @()
+    $pf86 = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ProgramFilesX86)
+    if (-not [string]::IsNullOrWhiteSpace($pf86)) {
+        $vs2022Root = Join-Path $pf86 "Microsoft Visual Studio\2022"
+        if (Test-Path -LiteralPath $vs2022Root -PathType Container) {
+            $roots = @(Get-ChildItem -LiteralPath $vs2022Root -Directory -ErrorAction SilentlyContinue)
+        }
+    }
+
+    foreach ($root in $roots) {
+        $msvcRoot = Join-Path $root.FullName "VC\Tools\MSVC"
+        if (-not (Test-Path -LiteralPath $msvcRoot -PathType Container)) {
+            continue
+        }
+
+        $toolsets = @(Get-ChildItem -LiteralPath $msvcRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+        foreach ($toolset in $toolsets) {
+            $cl = Join-Path $toolset.FullName "bin\Hostx64\x64\cl.exe"
+            if (Test-Path -LiteralPath $cl -PathType Leaf) {
+                return [pscustomobject]@{
+                    Installed = $true
+                    Root = $root.FullName
+                    Edition = $root.Name
+                    Toolset = $toolset.Name
+                    ClPath = $cl
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Installed = $false
+        Root = $null
+        Edition = $null
+        Toolset = $null
+        ClPath = $null
+    }
+}
+
+function Test-TripoSrCudaVsIntegration {
+    param([Parameter(Mandatory)]$CudaToolkit)
+
+    $vs = Get-Vs2022CppToolchainInfo
+    if (-not $vs.Installed) {
+        return [pscustomobject]@{
+            Valid = $false
+            Message = "Visual Studio 2022 C++ Build Tools were not found. TripoSR torchmcubes requires the VS2022 C++ toolchain."
+            Vs = $vs
+        }
+    }
+
+    $buildCustomizations = Join-Path $vs.Root "MSBuild\Microsoft\VC\v170\BuildCustomizations"
+    $props = Join-Path $buildCustomizations "CUDA $($CudaToolkit.Version).props"
+    $targets = Join-Path $buildCustomizations "CUDA $($CudaToolkit.Version).targets"
+
+    if (-not (Test-Path -LiteralPath $props -PathType Leaf) -or -not (Test-Path -LiteralPath $targets -PathType Leaf)) {
+        $cudaRoot = Split-Path -Parent (Split-Path -Parent $CudaToolkit.Path)
+        $source = Join-Path $cudaRoot "extras\visual_studio_integration\MSBuildExtensions"
+        return [pscustomobject]@{
+            Valid = $false
+            Message = "CUDA $($CudaToolkit.Version) Visual Studio integration is missing from '$buildCustomizations'. Expected CUDA .props/.targets files. Source files are normally under '$source'."
+            Vs = $vs
+        }
+    }
+
+    return [pscustomobject]@{
+        Valid = $true
+        Message = "VS2022 $($vs.Edition) / MSVC $($vs.Toolset) with CUDA $($CudaToolkit.Version) MSBuild integration"
+        Vs = $vs
+    }
+}
+
+function Assert-TripoSrNativeBuildEnvironment {
+    $cuda = Get-CudaToolkitInfo
+    if (-not $cuda.Installed) {
+        throw "CUDA Toolkit with nvcc is required for TripoSR torchmcubes. Install a supported CUDA Toolkit first."
+    }
+
+    $integration = Test-TripoSrCudaVsIntegration -CudaToolkit $cuda
+    if (-not $integration.Valid) {
+        throw $integration.Message
+    }
+
+    Write-Result "OK" $integration.Message
+}
+
 function Get-TripoSrTorchProfile {
     param([Parameter(Mandatory)]$CudaToolkit)
 
@@ -862,10 +969,13 @@ function Ensure-TripoSrRepository {
 }
 
 function Ensure-TripoSrVenv {
-    $python = Ensure-TripoSrPython
-
-    if (Test-Path -LiteralPath $TripoSrVenvPython) {
-        $versionResult = Invoke-NativeCapture -Executable $TripoSrVenvPython -Arguments @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    # Reuse an existing valid engine venv before looking for a base Python.
+    # This avoids reinstalling Python simply because the original interpreter
+    # is no longer on PATH after the venv has already been created.
+    if (Test-Path -LiteralPath $TripoSrVenvPython -PathType Leaf) {
+        $versionResult = Invoke-NativeCapture -Executable $TripoSrVenvPython -Arguments @(
+            "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+        )
         if ($versionResult.ExitCode -eq 0 -and $versionResult.Output.Count -gt 0) {
             $version = ($versionResult.Output | Select-Object -First 1).ToString().Trim()
             if ($version -in $TripoSrPreferredPythonVersions) {
@@ -874,20 +984,36 @@ function Ensure-TripoSrVenv {
             }
         }
 
+        if ($NoInstall) {
+            throw "TripoSR venv exists but is broken or unsupported. -NoInstall prevents recreation."
+        }
+
         Write-Result "WARN" "TripoSR venv exists with unsupported/broken Python; recreating only .venv"
         Remove-Item -LiteralPath $TripoSrVenv -Recurse -Force
     } elseif (Test-Path -LiteralPath $TripoSrVenv) {
+        if ($NoInstall) {
+            throw "Incomplete TripoSR venv detected. -NoInstall prevents recreation."
+        }
+
         Write-Result "WARN" "Incomplete TripoSR venv detected; recreating only .venv"
         Remove-Item -LiteralPath $TripoSrVenv -Recurse -Force
     }
 
+    $python = Ensure-TripoSrPython
     $result = Invoke-NativeCapture -Executable $python.Path -Arguments @("-m", "venv", $TripoSrVenv)
     if ($result.ExitCode -ne 0) {
         throw "Could not create TripoSR venv: $($result.Output -join ' | ')"
     }
 
-    if (-not (Test-Path -LiteralPath $TripoSrVenvPython)) {
+    if (-not (Test-Path -LiteralPath $TripoSrVenvPython -PathType Leaf)) {
         throw "TripoSR venv creation returned success but python.exe is missing."
+    }
+
+    $verify = Invoke-NativeCapture -Executable $TripoSrVenvPython -Arguments @(
+        "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    )
+    if ($verify.ExitCode -ne 0 -or $verify.Output.Count -eq 0 -or $verify.Output[0].ToString().Trim() -notin $TripoSrPreferredPythonVersions) {
+        throw "TripoSR venv was created but Python version validation failed."
     }
 
     Write-Result "OK" "Created isolated TripoSR venv"
@@ -1111,23 +1237,31 @@ function Test-TripoSrCli {
 function Invoke-TripoSrSmokeTest {
     Write-Header "TripoSR Smoke Test"
 
-    if (-not (Test-Path -LiteralPath $TripoSrVenvPython)) {
+    if (-not (Test-Path -LiteralPath $TripoSrVenvPython -PathType Leaf)) {
         throw "TripoSR venv is missing. Run '.\setup-asset-factory.ps1 triposr install' first."
     }
 
     $example = Join-Path $TripoSrRoot "examples\chair.png"
-    if (-not (Test-Path -LiteralPath $example)) {
+    if (-not (Test-Path -LiteralPath $example -PathType Leaf)) {
         throw "Official TripoSR example image is missing: $example"
     }
 
     Test-TripoSrCuda
-    Ensure-TripoSrRembgBackend
+
+    # Smoke tests validate; they do not silently repair dependencies.
+    $onnx = Invoke-TripoSrPython -Arguments @("-c", "import rembg, onnxruntime; print(onnxruntime.__version__)")
+    if ($onnx.ExitCode -ne 0) {
+        throw "TripoSR rembg CPU backend is not ready. Run 'triposr install' or 'triposr repair'. Details: $($onnx.Output -join ' | ')"
+    }
+    Write-Result "OK" "TripoSR rembg CPU backend ready (onnxruntime $($onnx.Output[0]))"
+
     Test-TripoSrImports
 
-    $outputDir = Join-Path $ProjectRoot "outputs\triposr-smoke"
-    if (-not (Test-Path -LiteralPath $outputDir)) {
-        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-    }
+    # Always use a unique output directory. Reusing outputs\triposr-smoke could
+    # allow an old mesh to make a broken inference look successful.
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $outputDir = Join-Path $ProjectRoot "outputs\triposr-smoke\$stamp"
+    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
     $runPy = Join-Path $TripoSrRoot "run.py"
     Write-Result "INFO" "Running official chair.png inference..."
@@ -1143,7 +1277,7 @@ function Invoke-TripoSrSmokeTest {
 
     $models = @(Get-ChildItem -LiteralPath $outputDir -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.obj', '.glb', '.ply') })
     if ($models.Count -eq 0) {
-        throw "TripoSR inference returned success but no 3D model was found in $outputDir"
+        throw "TripoSR inference returned success but no new 3D model was found in $outputDir"
     }
 
     Write-Result "OK" "TripoSR image-to-3D smoke test passed"
@@ -1203,6 +1337,15 @@ function Invoke-TripoSrInstall {
     Write-Header "TripoSR Install"
     Assert-BootstrapHost
 
+    if ($NoInstall) {
+        Write-Result "INFO" "-NoInstall: validation only; no repository/package changes will be made."
+        $doctorExit = Invoke-TripoSrDoctor
+        if ($doctorExit -ne 0) {
+            throw "TripoSR validation failed while -NoInstall was active."
+        }
+        return
+    }
+
     $git = Get-GitInfo
     if (-not $git.Installed) {
         if ($NoInstall) {
@@ -1222,6 +1365,7 @@ function Invoke-TripoSrInstall {
     Ensure-TripoSrPackagingTools
     Ensure-TripoSrPyTorch
     Test-TripoSrCuda
+    Assert-TripoSrNativeBuildEnvironment
     Ensure-TripoSrRequirements
     Ensure-TripoSrRembgBackend
     Test-TripoSrImports
@@ -1264,6 +1408,15 @@ function Invoke-TripoSrDoctor {
     }
 
     if ($failures -eq 0) {
+        try {
+            Assert-TripoSrNativeBuildEnvironment
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    if ($failures -eq 0) {
         try { Test-TripoSrCuda } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
         try {
             $onnx = Invoke-TripoSrPython -Arguments @("-c", "import onnxruntime; print(onnxruntime.__version__)")
@@ -1292,6 +1445,7 @@ function Invoke-TripoSrRepair {
     Ensure-TripoSrPackagingTools
     Ensure-TripoSrPyTorch
     Test-TripoSrCuda
+    Assert-TripoSrNativeBuildEnvironment
     Repair-TripoSrTorchMcubes
     Ensure-TripoSrRequirements
     Ensure-TripoSrRembgBackend
@@ -1302,7 +1456,7 @@ function Invoke-TripoSrRepair {
 }
 
 function Invoke-TripoSrCommand {
-    switch ($TriposrCommand) {
+    switch ($EngineCommand) {
         "install" { Invoke-TripoSrInstall }
         "status"  { Show-TripoSrStatus }
         "doctor"  {
@@ -1311,6 +1465,828 @@ function Invoke-TripoSrCommand {
         }
         "repair"  { Invoke-TripoSrRepair }
         "smoke"   { Invoke-TripoSrSmokeTest }
+    }
+}
+
+
+function Get-ComfyUiPythonInfo {
+    $path = Get-PythonPathForVersion -Version $ComfyUiPreferredPythonVersion
+    if ($path) {
+        return [pscustomobject]@{
+            Installed = $true
+            Version = $ComfyUiPreferredPythonVersion
+            Path = $path
+        }
+    }
+
+    return [pscustomobject]@{
+        Installed = $false
+        Version = $null
+        Path = $null
+    }
+}
+
+function Ensure-ComfyUiPython {
+    $python = Get-ComfyUiPythonInfo
+    if ($python.Installed) {
+        Write-Result "OK" "ComfyUI Python $($python.Version) available - $($python.Path)"
+        return $python
+    }
+
+    if ($NoInstall) {
+        throw "ComfyUI requires Python 3.11, but it is not installed. -NoInstall prevents automatic installation."
+    }
+
+    Install-WingetPackage -Id "Python.Python.3.11" -DisplayName "Python 3.11 for ComfyUI"
+    Refresh-ProcessPath
+
+    $python = Get-ComfyUiPythonInfo
+    if (-not $python.Installed) {
+        throw "Python 3.11 installation completed, but ComfyUI-compatible Python is still not detectable. Open a new terminal and rerun 'comfyui install'."
+    }
+
+    return $python
+}
+
+function Test-ComfyUiRepository {
+    if (-not (Test-Path -LiteralPath $ComfyUiRoot)) {
+        return [pscustomobject]@{ Valid = $false; State = "missing"; Origin = $null; Message = "engines\comfyui does not exist" }
+    }
+
+    $gitDir = Join-Path $ComfyUiRoot ".git"
+    if (-not (Test-Path -LiteralPath $gitDir -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "partial"; Origin = $null; Message = "engines\comfyui exists but is not a Git repository" }
+    }
+
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Git is unavailable" }
+    }
+
+    $originResult = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $ComfyUiRoot, "remote", "get-url", "origin")
+    if ($originResult.ExitCode -ne 0 -or $originResult.Output.Count -eq 0) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Could not read ComfyUI origin" }
+    }
+
+    $origin = ($originResult.Output | Select-Object -First 1).ToString().Trim()
+    if ((Normalize-GitRemoteUrl $origin) -ne (Normalize-GitRemoteUrl $ComfyUiRepoUrl)) {
+        return [pscustomobject]@{ Valid = $false; State = "wrong-origin"; Origin = $origin; Message = "Unexpected ComfyUI origin" }
+    }
+
+    if (-not (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "main.py is missing" }
+    }
+
+    if (-not (Test-Path -LiteralPath $ComfyUiRequirements -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "requirements.txt is missing" }
+    }
+
+    return [pscustomobject]@{ Valid = $true; State = "ready"; Origin = $origin; Message = "Official ComfyUI repository present" }
+}
+
+function Ensure-ComfyUiRepository {
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        throw "Git is required before installing ComfyUI."
+    }
+
+    $enginesDir = Join-Path $ProjectRoot "engines"
+    if (-not (Test-Path -LiteralPath $enginesDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $enginesDir -Force | Out-Null
+    }
+
+    $state = Test-ComfyUiRepository
+    if ($state.State -eq "missing") {
+        Write-Result "INFO" "Cloning ComfyUI $ComfyUiPinnedRef..."
+        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+            "clone",
+            "--branch", $ComfyUiPinnedRef,
+            "--single-branch",
+            $ComfyUiRepoUrl,
+            $ComfyUiRoot
+        )
+        if ($clone.ExitCode -ne 0) {
+            throw "Could not clone ComfyUI $ComfyUiPinnedRef`: $($clone.Output -join ' | ')"
+        }
+
+        $state = Test-ComfyUiRepository
+        if (-not $state.Valid) {
+            throw "ComfyUI clone completed but repository verification failed: $($state.Message)"
+        }
+    } elseif (-not $state.Valid) {
+        if ($state.State -eq "wrong-origin") {
+            throw "engines\comfyui is a Git repository with unexpected origin '$($state.Origin)'. Nothing was modified."
+        }
+
+        throw "ComfyUI repository is incomplete or invalid: $($state.Message). Nothing was deleted."
+    }
+
+    # Reproducibility: Asset Factory currently validates ComfyUI v0.35.0.
+    # Existing repositories are moved to the pinned release only when tracked
+    # files are clean. Runtime data such as models and .venv are not touched.
+    $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+        "-C", $ComfyUiRoot,
+        "status", "--porcelain", "--untracked-files=no"
+    )
+    if ($dirty.ExitCode -ne 0) {
+        throw "Could not inspect ComfyUI worktree state: $($dirty.Output -join ' | ')"
+    }
+
+    $target = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+        "-C", $ComfyUiRoot,
+        "rev-parse", "$ComfyUiPinnedRef^{commit}"
+    )
+    if ($target.ExitCode -ne 0 -or $target.Output.Count -eq 0) {
+        $fetch = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+            "-C", $ComfyUiRoot,
+            "fetch", "--tags", "origin", $ComfyUiPinnedRef
+        )
+        if ($fetch.ExitCode -ne 0) {
+            throw "Could not fetch pinned ComfyUI ref $ComfyUiPinnedRef`: $($fetch.Output -join ' | ')"
+        }
+        $target = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+            "-C", $ComfyUiRoot,
+            "rev-parse", "$ComfyUiPinnedRef^{commit}"
+        )
+    }
+
+    if ($target.ExitCode -ne 0 -or $target.Output.Count -eq 0) {
+        throw "Could not resolve pinned ComfyUI ref $ComfyUiPinnedRef."
+    }
+
+    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $ComfyUiRoot, "rev-parse", "HEAD")
+    if ($head.ExitCode -ne 0 -or $head.Output.Count -eq 0) {
+        throw "Could not resolve current ComfyUI HEAD."
+    }
+
+    $headSha = $head.Output[0].ToString().Trim()
+    $targetSha = $target.Output[0].ToString().Trim()
+
+    if ($headSha -ne $targetSha) {
+        if ($dirty.Output.Count -gt 0) {
+            throw "ComfyUI tracked files contain local changes. Refusing to switch to pinned release $ComfyUiPinnedRef. Commit/revert those changes first."
+        }
+
+        Write-Result "INFO" "Switching ComfyUI to validated release $ComfyUiPinnedRef..."
+        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @(
+            "-C", $ComfyUiRoot,
+            "checkout", "--detach", $targetSha
+        )
+        if ($checkout.ExitCode -ne 0) {
+            throw "Could not checkout ComfyUI $ComfyUiPinnedRef`: $($checkout.Output -join ' | ')"
+        }
+    }
+
+    $verify = Test-ComfyUiRepository
+    if (-not $verify.Valid) {
+        throw "ComfyUI repository verification failed after pinning: $($verify.Message)"
+    }
+
+    Write-Result "OK" "Official ComfyUI repository ready at $ComfyUiPinnedRef"
+}
+
+function Ensure-ComfyUiVenv {
+    # Reuse an existing valid venv even if the base Python installation is no
+    # longer discoverable. A base interpreter is only required to create or
+    # recreate the venv.
+    if (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf) {
+        $versionResult = Invoke-NativeCapture -Executable $ComfyUiVenvPython -Arguments @(
+            "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+        )
+        if ($versionResult.ExitCode -eq 0 -and $versionResult.Output.Count -gt 0) {
+            $version = ($versionResult.Output | Select-Object -First 1).ToString().Trim()
+            if ($version -eq $ComfyUiPreferredPythonVersion) {
+                Write-Result "OK" "Reusing ComfyUI venv with Python $version"
+                return
+            }
+        }
+
+        if ($NoInstall) {
+            throw "ComfyUI venv exists but is broken or does not use Python $ComfyUiPreferredPythonVersion. -NoInstall prevents recreation."
+        }
+
+        Write-Result "WARN" "ComfyUI venv exists with unsupported/broken Python; recreating only .venv"
+        Remove-Item -LiteralPath $ComfyUiVenv -Recurse -Force
+    } elseif (Test-Path -LiteralPath $ComfyUiVenv) {
+        if ($NoInstall) {
+            throw "Incomplete ComfyUI venv detected. -NoInstall prevents recreation."
+        }
+
+        Write-Result "WARN" "Incomplete ComfyUI venv detected; recreating only .venv"
+        Remove-Item -LiteralPath $ComfyUiVenv -Recurse -Force
+    }
+
+    $python = Ensure-ComfyUiPython
+    $result = Invoke-NativeCapture -Executable $python.Path -Arguments @("-m", "venv", $ComfyUiVenv)
+    if ($result.ExitCode -ne 0) {
+        throw "Could not create ComfyUI venv: $($result.Output -join ' | ')"
+    }
+
+    if (-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) {
+        throw "ComfyUI venv creation returned success but python.exe is missing."
+    }
+
+    $verify = Invoke-NativeCapture -Executable $ComfyUiVenvPython -Arguments @(
+        "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    )
+    if ($verify.ExitCode -ne 0 -or $verify.Output.Count -eq 0 -or $verify.Output[0].ToString().Trim() -ne $ComfyUiPreferredPythonVersion) {
+        throw "ComfyUI venv was created but Python version validation failed."
+    }
+
+    Write-Result "OK" "Created isolated ComfyUI venv"
+}
+
+function Invoke-ComfyUiPython {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    if (-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) {
+        throw "ComfyUI venv is missing. Run '.\setup-asset-factory.ps1 comfyui install'."
+    }
+
+    return Invoke-NativeCapture -Executable $ComfyUiVenvPython -Arguments $Arguments -WorkingDirectory $ComfyUiRoot
+}
+
+function Ensure-ComfyUiPackagingTools {
+    $result = Invoke-ComfyUiPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
+    if ($result.ExitCode -ne 0) {
+        throw "Could not upgrade ComfyUI pip: $($result.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "ComfyUI pip ready"
+}
+
+function Get-ComfyUiTorchInfo {
+    if (-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) {
+        return [pscustomobject]@{
+            Available = $false
+            Torch = $null
+            TorchVision = $null
+            TorchAudio = $null
+            Cuda = $null
+            CudaAvailable = $false
+            Gpu = $null
+        }
+    }
+
+    $code = @'
+import torch
+try:
+    import torchvision
+    torchvision_version = torchvision.__version__
+except Exception:
+    torchvision_version = ""
+try:
+    import torchaudio
+    torchaudio_version = torchaudio.__version__
+except Exception:
+    torchaudio_version = ""
+
+print(torch.__version__)
+print(torchvision_version)
+print(torchaudio_version)
+print(torch.version.cuda or "")
+print(str(torch.cuda.is_available()))
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
+'@
+
+    $result = Invoke-ComfyUiPython -Arguments @("-c", $code)
+    if ($result.ExitCode -ne 0 -or $result.Output.Count -lt 6) {
+        return [pscustomobject]@{
+            Available = $false
+            Torch = $null
+            TorchVision = $null
+            TorchAudio = $null
+            Cuda = $null
+            CudaAvailable = $false
+            Gpu = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        Available = $true
+        Torch = $result.Output[0].ToString().Trim()
+        TorchVision = $result.Output[1].ToString().Trim()
+        TorchAudio = $result.Output[2].ToString().Trim()
+        Cuda = $result.Output[3].ToString().Trim()
+        CudaAvailable = ($result.Output[4].ToString().Trim() -eq "True")
+        Gpu = $result.Output[5].ToString().Trim()
+    }
+}
+
+function Ensure-ComfyUiPyTorch {
+    $existing = Get-ComfyUiTorchInfo
+    $existingUsable = (
+        $existing.Available -and
+        $existing.Cuda -eq $ComfyUiExpectedTorchCuda -and
+        $existing.CudaAvailable -and
+        -not [string]::IsNullOrWhiteSpace($existing.Gpu) -and
+        -not [string]::IsNullOrWhiteSpace($existing.TorchVision) -and
+        -not [string]::IsNullOrWhiteSpace($existing.TorchAudio)
+    )
+
+    if ($existingUsable) {
+        Write-Result "OK" "Reusing ComfyUI PyTorch $($existing.Torch) / CUDA $($existing.Cuda) / GPU $($existing.Gpu)"
+        return
+    }
+
+    if ($NoInstall) {
+        throw "ComfyUI requires a working PyTorch CUDA $ComfyUiExpectedTorchCuda environment. -NoInstall prevents automatic installation."
+    }
+
+    if ($existing.Available) {
+        Write-Result "WARN" "Existing ComfyUI PyTorch environment is incomplete/incompatible; repairing only the ComfyUI venv"
+    } else {
+        Write-Result "INFO" "Installing PyTorch CUDA $ComfyUiExpectedTorchCuda in ComfyUI venv..."
+    }
+
+    $install = Invoke-ComfyUiPython -Arguments @(
+        "-m", "pip", "install", "--upgrade",
+        "torch", "torchvision", "torchaudio",
+        "--index-url", $ComfyUiTorchIndexUrl
+    )
+
+    if ($install.ExitCode -ne 0) {
+        throw "ComfyUI PyTorch installation failed: $($install.Output -join ' | ')"
+    }
+
+    $verify = Get-ComfyUiTorchInfo
+    if (-not $verify.Available) {
+        throw "ComfyUI PyTorch installation completed but torch/vision/audio imports failed."
+    }
+    if ($verify.Cuda -ne $ComfyUiExpectedTorchCuda) {
+        throw "ComfyUI PyTorch installation completed but reports CUDA '$($verify.Cuda)' instead of expected '$ComfyUiExpectedTorchCuda'."
+    }
+    if (-not $verify.CudaAvailable -or [string]::IsNullOrWhiteSpace($verify.Gpu)) {
+        throw "ComfyUI PyTorch installation completed but CUDA GPU execution is unavailable. Check the NVIDIA driver."
+    }
+    if ([string]::IsNullOrWhiteSpace($verify.TorchVision) -or [string]::IsNullOrWhiteSpace($verify.TorchAudio)) {
+        throw "ComfyUI PyTorch installation completed but torchvision or torchaudio is not importable."
+    }
+
+    Write-Result "OK" "ComfyUI PyTorch $($verify.Torch) / CUDA $($verify.Cuda) / GPU $($verify.Gpu) installed"
+}
+
+function Get-ComfyUiVersion {
+    if (-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) {
+        return $null
+    }
+
+    $result = Invoke-ComfyUiPython -Arguments @(
+        "-c",
+        "import comfyui_version; print(comfyui_version.__version__)"
+    )
+    if ($result.ExitCode -ne 0 -or $result.Output.Count -eq 0) {
+        return $null
+    }
+
+    return $result.Output[0].ToString().Trim()
+}
+
+function Test-ComfyUiDependencies {
+    if (-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; Message = "ComfyUI venv is missing" }
+    }
+
+    $code = @'
+import importlib
+modules = [
+    "aiohttp",
+    "yaml",
+    "PIL",
+    "numpy",
+    "transformers",
+    "safetensors",
+    "torchsde",
+    "sqlalchemy",
+    "alembic",
+]
+failed = []
+for name in modules:
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        failed.append(f"{name}: {exc}")
+if failed:
+    print(" | ".join(failed))
+    raise SystemExit(1)
+print("OK")
+'@
+
+    $probe = Invoke-ComfyUiPython -Arguments @("-c", $code)
+    if ($probe.ExitCode -ne 0) {
+        $message = if ($probe.Output.Count -gt 0) { $probe.Output -join " | " } else { "One or more imports failed" }
+        return [pscustomobject]@{ Valid = $false; Message = $message }
+    }
+
+    return [pscustomobject]@{ Valid = $true; Message = "Core ComfyUI dependencies import successfully" }
+}
+
+function Get-FreeTcpPort {
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        if ($null -ne $listener) {
+            try { $listener.Stop() } catch {}
+        }
+    }
+}
+
+function Get-FileTailText {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$Lines = 40
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ""
+    }
+
+    try {
+        return ((Get-Content -LiteralPath $Path -Tail $Lines -ErrorAction Stop) -join [Environment]::NewLine)
+    } catch {
+        return ""
+    }
+}
+
+function Ensure-ComfyUiRequirements {
+    if (-not (Test-Path -LiteralPath $ComfyUiRequirements -PathType Leaf)) {
+        throw "ComfyUI requirements.txt is missing."
+    }
+
+    if ($NoInstall) {
+        $probe = Test-ComfyUiDependencies
+        if (-not $probe.Valid) {
+            throw "ComfyUI Python dependencies are incomplete. -NoInstall prevents installation. Details: $($probe.Message)"
+        }
+        Write-Result "OK" "ComfyUI Python dependencies already valid"
+        return
+    }
+
+    # pip is idempotent here: already-satisfied requirements are reused. PyTorch
+    # was installed first from the CUDA 13.0 index, so the unpinned torch entries
+    # in requirements.txt remain satisfied instead of replacing the CUDA build.
+    $result = Invoke-ComfyUiPython -Arguments @("-m", "pip", "install", "-r", $ComfyUiRequirements)
+    if ($result.ExitCode -ne 0) {
+        throw "ComfyUI requirements installation failed: $($result.Output -join ' | ')"
+    }
+
+    $check = Invoke-ComfyUiPython -Arguments @("-m", "pip", "check")
+    if ($check.ExitCode -ne 0) {
+        throw "ComfyUI dependency consistency check failed: $($check.Output -join ' | ')"
+    }
+
+    $probe = Test-ComfyUiDependencies
+    if (-not $probe.Valid) {
+        throw "ComfyUI requirements installation completed but runtime dependency probe failed: $($probe.Message)"
+    }
+
+    Write-Result "OK" "ComfyUI requirements installed and validated"
+}
+
+function Test-ComfyUiRuntime {
+    $torch = Get-ComfyUiTorchInfo
+    if (-not $torch.Available) {
+        throw "PyTorch/torchvision/torchaudio are not fully importable in the ComfyUI venv."
+    }
+
+    Write-Result "INFO" "torch=$($torch.Torch)"
+    Write-Result "INFO" "torchvision=$($torch.TorchVision)"
+    Write-Result "INFO" "torchaudio=$($torch.TorchAudio)"
+    Write-Result "INFO" "torch_cuda=$($torch.Cuda)"
+    Write-Result "INFO" "cuda_available=$($torch.CudaAvailable)"
+    Write-Result "INFO" "gpu=$($torch.Gpu)"
+
+    if ($torch.Cuda -ne $ComfyUiExpectedTorchCuda) {
+        throw "ComfyUI PyTorch reports CUDA '$($torch.Cuda)'; expected $ComfyUiExpectedTorchCuda."
+    }
+    if (-not $torch.CudaAvailable) {
+        throw "CUDA is unavailable in the ComfyUI venv."
+    }
+    if ([string]::IsNullOrWhiteSpace($torch.Gpu)) {
+        throw "ComfyUI could not identify the CUDA GPU."
+    }
+    if ([string]::IsNullOrWhiteSpace($torch.TorchVision) -or [string]::IsNullOrWhiteSpace($torch.TorchAudio)) {
+        throw "torchvision or torchaudio is not importable in the ComfyUI venv."
+    }
+
+    $deps = Test-ComfyUiDependencies
+    if (-not $deps.Valid) {
+        throw "ComfyUI dependency probe failed: $($deps.Message)"
+    }
+
+    $version = Get-ComfyUiVersion
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "Could not read the ComfyUI version from comfyui_version.py."
+    }
+    Write-Result "INFO" "comfyui=$version"
+
+    if ($version -ne $ComfyUiExpectedVersion) {
+        throw "ComfyUI version '$version' is not the validated Asset Factory version '$ComfyUiExpectedVersion'. Run 'comfyui install' to restore the pinned release."
+    }
+
+    Write-Result "OK" "ComfyUI CUDA runtime validation passed"
+}
+
+function Show-ComfyUiStatus {
+    Write-Header "ComfyUI Status"
+
+    $repo = Test-ComfyUiRepository
+    if ($repo.Valid) {
+        Write-Result "OK" "Repository: $($repo.Origin)"
+        $git = Get-GitInfo
+        if ($git.Installed) {
+            $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $ComfyUiRoot, "rev-parse", "--short", "HEAD")
+            if ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0) {
+                Write-Result "INFO" "Repository HEAD: $($head.Output[0]) / pinned ref: $ComfyUiPinnedRef"
+            }
+        }
+    } elseif ($repo.State -eq "missing") {
+        Write-Result "MISSING" "ComfyUI repository not installed"
+    } else {
+        Write-Result "WARN" "ComfyUI repository state: $($repo.Message)"
+    }
+
+    $python = Get-ComfyUiPythonInfo
+    if ($python.Installed) {
+        Write-Result "OK" "Compatible base Python $($python.Version) - $($python.Path)"
+    } else {
+        Write-Result "INFO" "Base Python 3.11 not currently detectable (an existing valid venv can still be used)"
+    }
+
+    if (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf) {
+        $version = Invoke-NativeCapture -Executable $ComfyUiVenvPython -Arguments @("--version")
+        if ($version.ExitCode -eq 0) {
+            Write-Result "OK" "Venv: $(($version.Output | Select-Object -First 1).ToString().Trim())"
+        } else {
+            Write-Result "WARN" "ComfyUI venv exists but Python does not run"
+        }
+
+        $torch = Get-ComfyUiTorchInfo
+        if ($torch.Available) {
+            Write-Result "OK" "PyTorch $($torch.Torch) / CUDA $($torch.Cuda) / cuda_available=$($torch.CudaAvailable)"
+            if (-not [string]::IsNullOrWhiteSpace($torch.Gpu)) {
+                Write-Result "OK" "GPU: $($torch.Gpu)"
+            }
+        } else {
+            Write-Result "MISSING" "PyTorch/CUDA not ready in ComfyUI venv"
+        }
+
+        $comfyVersion = Get-ComfyUiVersion
+        if (-not [string]::IsNullOrWhiteSpace($comfyVersion)) {
+            if ($comfyVersion -eq $ComfyUiExpectedVersion) {
+                Write-Result "OK" "ComfyUI version $comfyVersion"
+            } else {
+                Write-Result "WARN" "ComfyUI version $comfyVersion (validated version: $ComfyUiExpectedVersion)"
+            }
+        }
+    } else {
+        Write-Result "MISSING" "ComfyUI isolated venv"
+    }
+
+    if (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf) {
+        Write-Result "OK" "ComfyUI main.py present"
+    } else {
+        Write-Result "MISSING" "ComfyUI main.py"
+    }
+}
+
+function Invoke-ComfyUiInstall {
+    Write-Header "ComfyUI Install"
+    Assert-BootstrapHost
+
+    if ($NoInstall) {
+        Write-Result "INFO" "-NoInstall: validation only; no repository/package changes will be made."
+        $doctorExit = Invoke-ComfyUiDoctor
+        if ($doctorExit -ne 0) {
+            throw "ComfyUI validation failed while -NoInstall was active."
+        }
+        return
+    }
+
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        if ($NoInstall) {
+            throw "Git is missing and -NoInstall was specified."
+        }
+        Install-WingetPackage -Id "Git.Git" -DisplayName "Git"
+    }
+
+    $gpu = Get-NvidiaInfo
+    if (-not $gpu.Available) {
+        throw "NVIDIA GPU is not detectable with nvidia-smi."
+    }
+    Write-Result "OK" "NVIDIA GPU: $($gpu.Name), $($gpu.VramMiB) MiB VRAM"
+
+    Ensure-ComfyUiRepository
+    Ensure-ComfyUiVenv
+    Ensure-ComfyUiPackagingTools
+    Ensure-ComfyUiPyTorch
+    Ensure-ComfyUiRequirements
+    Test-ComfyUiRuntime
+
+    Write-Result "OK" "ComfyUI installation validated"
+}
+
+function Invoke-ComfyUiDoctor {
+    Write-Header "ComfyUI Doctor"
+    $failures = 0
+
+    if (-not (Test-IsWindows)) {
+        Write-Result "FAIL" "Windows is required for this ComfyUI profile."
+        $failures++
+    } else {
+        Write-Result "OK" "Windows detected"
+    }
+
+    if ($PSVersionTable.PSVersion -lt $MinimumPowerShellVersion) {
+        Write-Result "FAIL" "PowerShell $MinimumPowerShellVersion or newer is required."
+        $failures++
+    } else {
+        Write-Result "OK" "PowerShell version supported: $($PSVersionTable.PSVersion)"
+    }
+
+    $repo = Test-ComfyUiRepository
+    if ($repo.Valid) {
+        Write-Result "OK" "Official ComfyUI repository valid"
+    } else {
+        Write-Result "FAIL" "Repository: $($repo.Message)"
+        $failures++
+    }
+
+    if (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf) {
+        $version = Invoke-NativeCapture -Executable $ComfyUiVenvPython -Arguments @(
+            "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+        )
+        if ($version.ExitCode -eq 0 -and $version.Output.Count -gt 0 -and $version.Output[0].ToString().Trim() -eq $ComfyUiPreferredPythonVersion) {
+            Write-Result "OK" "ComfyUI venv Python $ComfyUiPreferredPythonVersion"
+        } else {
+            Write-Result "FAIL" "ComfyUI venv does not use a working Python $ComfyUiPreferredPythonVersion"
+            $failures++
+        }
+    } else {
+        Write-Result "FAIL" "ComfyUI venv missing"
+        $failures++
+    }
+
+    if (-not (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf)) {
+        Write-Result "FAIL" "ComfyUI main.py missing"
+        $failures++
+    } else {
+        Write-Result "OK" "ComfyUI main.py present"
+    }
+
+    if (-not (Test-Path -LiteralPath $ComfyUiRequirements -PathType Leaf)) {
+        Write-Result "FAIL" "ComfyUI requirements.txt missing"
+        $failures++
+    } else {
+        Write-Result "OK" "ComfyUI requirements.txt present"
+    }
+
+    if ($failures -eq 0) {
+        try {
+            $pipCheck = Invoke-ComfyUiPython -Arguments @("-m", "pip", "check")
+            if ($pipCheck.ExitCode -ne 0) {
+                throw "pip check failed: $($pipCheck.Output -join ' | ')"
+            }
+            Write-Result "OK" "Python dependency consistency check passed"
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    if ($failures -eq 0) {
+        try {
+            Test-ComfyUiRuntime
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    if ($failures -gt 0) {
+        Write-Result "FAIL" "ComfyUI doctor found $failures blocking issue(s)."
+        return 1
+    }
+
+    Write-Result "OK" "ComfyUI doctor found no blocking issue."
+    return 0
+}
+
+function Invoke-ComfyUiSmokeTest {
+    Write-Header "ComfyUI Smoke Test"
+
+    $doctorExit = Invoke-ComfyUiDoctor
+    if ($doctorExit -ne 0) {
+        throw "ComfyUI smoke test aborted because doctor failed."
+    }
+
+    # Always use a dedicated free port so the smoke test never interferes with
+    # an already-running interactive ComfyUI instance on the normal port 8188.
+    $smokePort = Get-FreeTcpPort
+    $baseUrl = "http://$($ComfyUiSmokeHost):$smokePort"
+    $healthUrl = "$baseUrl/system_stats"
+
+    $logDir = Join-Path $ProjectRoot "outputs\comfyui-smoke"
+    if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $stdoutPath = Join-Path $logDir "comfyui-$stamp.stdout.log"
+    $stderrPath = Join-Path $logDir "comfyui-$stamp.stderr.log"
+
+    $process = $null
+    try {
+        $arguments = @(
+            "main.py",
+            "--lowvram",
+            "--listen", $ComfyUiSmokeHost,
+            "--port", $smokePort.ToString()
+        )
+
+        $startParams = @{
+            FilePath = $ComfyUiVenvPython
+            ArgumentList = $arguments
+            WorkingDirectory = $ComfyUiRoot
+            WindowStyle = "Hidden"
+            RedirectStandardOutput = $stdoutPath
+            RedirectStandardError = $stderrPath
+            PassThru = $true
+        }
+        $process = Start-Process @startParams
+
+        if ($null -eq $process) {
+            throw "Could not start ComfyUI smoke process."
+        }
+
+        Write-Result "INFO" "Waiting for ComfyUI API at $healthUrl"
+        $deadline = (Get-Date).AddSeconds($ComfyUiSmokeTimeoutSeconds)
+        $ready = $false
+
+        while ((Get-Date) -lt $deadline) {
+            $process.Refresh()
+            if ($process.HasExited) {
+                $stderrTail = Get-FileTailText -Path $stderrPath
+                $stdoutTail = Get-FileTailText -Path $stdoutPath
+                $detailParts = @($stderrTail, $stdoutTail) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                $details = $detailParts -join [Environment]::NewLine
+                throw "ComfyUI exited before its API became ready (exit code $($process.ExitCode)).`n$details"
+            }
+
+            try {
+                $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 3
+                if ($response.StatusCode -eq 200) {
+                    $stats = $response.Content | ConvertFrom-Json
+                    if ($null -ne $stats) {
+                        $ready = $true
+                        break
+                    }
+                }
+            } catch {}
+
+            Start-Sleep -Milliseconds 750
+        }
+
+        if (-not $ready) {
+            $stderrTail = Get-FileTailText -Path $stderrPath
+            $stdoutTail = Get-FileTailText -Path $stdoutPath
+            $detailParts = @($stderrTail, $stdoutTail) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            $details = $detailParts -join [Environment]::NewLine
+            throw "ComfyUI API did not become reachable within $ComfyUiSmokeTimeoutSeconds seconds.`n$details"
+        }
+
+        Write-Result "OK" "ComfyUI API smoke test passed at $healthUrl"
+    } finally {
+        if ($null -ne $process) {
+            try {
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    try { Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue } catch {}
+                }
+            } catch {}
+            try { $process.Dispose() } catch {}
+        }
+    }
+}
+
+function Invoke-ComfyUiCommand {
+    switch ($EngineCommand) {
+        "install" { Invoke-ComfyUiInstall }
+        "status"  { Show-ComfyUiStatus }
+        "doctor"  {
+            $exitCode = Invoke-ComfyUiDoctor
+            if ($exitCode -ne 0) { exit $exitCode }
+        }
+        "smoke"   { Invoke-ComfyUiSmokeTest }
+        "repair"  {
+            Write-Result "INFO" "ComfyUI repair uses the idempotent install/revalidation path."
+            Invoke-ComfyUiInstall
+        }
     }
 }
 
@@ -1381,6 +2357,15 @@ function Show-Status {
     } else {
         Write-Result "WARN" "TripoSR repository state: $($tripoRepoState.Message)"
     }
+
+    $comfyRepoState = Test-ComfyUiRepository
+    if ($comfyRepoState.Valid) {
+        Write-Result "OK" "ComfyUI repository installed"
+    } elseif ($comfyRepoState.State -eq "missing") {
+        Write-Result "INFO" "ComfyUI not installed; run .\setup-asset-factory.ps1 comfyui install"
+    } else {
+        Write-Result "WARN" "ComfyUI repository state: $($comfyRepoState.Message)"
+    }
 }
 
 function Invoke-Install {
@@ -1436,6 +2421,7 @@ function Invoke-Install {
     Ensure-GitRepository
 
     Write-Result "INFO" "TripoSR remains an opt-in engine install: .\setup-asset-factory.ps1 triposr install"
+    Write-Result "INFO" "ComfyUI remains an opt-in engine install: .\setup-asset-factory.ps1 comfyui install"
     Write-Result "INFO" "Each AI engine uses its own isolated, pinned Python/Torch/CUDA environment."
 
     Show-Status
@@ -1562,6 +2548,11 @@ Usage:
   .\setup-asset-factory.ps1 triposr doctor
   .\setup-asset-factory.ps1 triposr repair
   .\setup-asset-factory.ps1 triposr smoke
+  .\setup-asset-factory.ps1 comfyui install
+  .\setup-asset-factory.ps1 comfyui status
+  .\setup-asset-factory.ps1 comfyui doctor
+  .\setup-asset-factory.ps1 comfyui smoke
+  .\setup-asset-factory.ps1 comfyui repair
   .\setup-asset-factory.ps1 help
 
 Commands:
@@ -1570,16 +2561,18 @@ Commands:
   status    Show detected tools, paths, versions, repository state and GPU information.
   doctor    Run smoke tests for Git, Python, Blender headless, GPU query and repository structure.
   triposr   Manage the isolated TripoSR engine. Subcommands: install, status, doctor, repair, smoke.
+  comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair.
   help      Show this help.
 
 Options:
-  -NoInstall  Initialize/detect only. Never invoke winget.
+  -NoInstall  Initialize/detect only. Never invoke winget or install missing engine packages.
 
 Important:
   - This bootstrap targets Windows 11 and requires Windows PowerShell 5.1+ or PowerShell 7+.
   - TripoSR is opt-in: use `triposr install`; it never installs packages into global Python.
-  - TripoSR uses an isolated Python 3.11/3.10 venv and a CUDA/PyTorch profile matching the local CUDA Toolkit major version.
-  - Each AI engine uses an isolated, pinned Python environment.
+  - ComfyUI is opt-in: use `comfyui install`; it uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
+  - Engine repositories, venvs, downloaded models and generated outputs are local runtime data, not repository source.
+  - Each AI engine uses an isolated Python environment.
   - Heavy GPU workloads must remain sequential on the ~8 GiB target GPU.
 "@ | Write-Host
 }
@@ -1595,6 +2588,7 @@ try {
             }
         }
         "triposr" { Invoke-TripoSrCommand }
+        "comfyui" { Invoke-ComfyUiCommand }
         "help"    { Show-Help }
     }
 } catch {
