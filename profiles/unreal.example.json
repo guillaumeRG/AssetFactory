@@ -1,0 +1,15 @@
+{
+  "projectId": "example-unreal-project",
+  "engine": "unreal",
+  "projectPath": "C:\\path\\to\\YourProject.uproject",
+  "contentRoot": "/Game/Assets/Generated",
+  "unrealEditorCmd": null,
+  "import": {
+    "replaceExisting": true,
+    "importMaterials": false,
+    "importTextures": false,
+    "combineMeshes": true,
+    "generateLightmapUVs": true,
+    "autoGenerateCollision": true
+  }
+}
