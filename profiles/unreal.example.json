@@ -1,6 +1,7 @@
 {
   "projectId": "example-unreal-project",
   "engine": "unreal",
+  "autoImport": false,
   "projectPath": "C:\\path\\to\\YourProject.uproject",
   "contentRoot": "/Game/Assets/Generated",
   "unrealEditorCmd": null,

@@ -18,3 +18,6 @@ cache/
 # Locally installed engines
 engines/triposr/
 engines/comfyui/
+
+profiles/*.json
+!profiles/unreal.example.json

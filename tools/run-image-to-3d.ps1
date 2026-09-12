@@ -10,7 +10,15 @@ param(
     [long]$Seed = 0,
 
     [ValidateRange(0.001, 1000000.0)]
-    [double]$TargetHeight = 1.0
+    [double]$TargetHeight = 1.0,
+
+    [string]$ProjectProfile = "",
+
+    [string]$AssetId = "",
+
+    [string]$Category = "",
+
+    [System.Nullable[bool]]$AutoImport = $null
 )
 
 Set-StrictMode -Version Latest
@@ -23,6 +31,7 @@ $AssetFactoryRoot = [System.IO.Path]::GetFullPath(
 $ComfyRunner = Join-Path $AssetFactoryRoot "tools\run-comfyui.ps1"
 $TripoRunner = Join-Path $AssetFactoryRoot "tools\run-triposr.ps1"
 $BlenderScript = Join-Path $AssetFactoryRoot "blender\scripts\process-mesh.py"
+$UnrealImportRunner = Join-Path $AssetFactoryRoot "tools\import-unreal.ps1"
 
 function Write-Info {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -82,6 +91,68 @@ function Get-BlenderExecutable {
 
     return $null
 }
+
+function Resolve-AssetFactoryPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $AssetFactoryRoot $Path))
+}
+
+function Resolve-UnrealImportConfiguration {
+    $result = [ordered]@{
+        enabled = $false
+        profilePath = $null
+        autoImport = $false
+        assetId = $AssetId
+        category = $Category
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ProjectProfile)) {
+        return $result
+    }
+
+    $resolvedProfile = Resolve-AssetFactoryPath -Path $ProjectProfile
+    if (-not (Test-Path -LiteralPath $resolvedProfile -PathType Leaf)) {
+        throw "Project profile not found: $resolvedProfile"
+    }
+
+    try {
+        $profile = Get-Content -LiteralPath $resolvedProfile -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        throw "Could not read project profile '$resolvedProfile': $($_.Exception.Message)"
+    }
+
+    $profileAutoImport = $false
+    if ($profile.PSObject.Properties.Name -contains "autoImport") {
+        $profileAutoImport = [bool]$profile.autoImport
+    }
+
+    $effectiveAutoImport = $profileAutoImport
+    if ($null -ne $AutoImport) {
+        $effectiveAutoImport = [bool]$AutoImport
+    }
+
+    $result.enabled = $true
+    $result.profilePath = $resolvedProfile
+    $result.autoImport = $effectiveAutoImport
+
+    if ($effectiveAutoImport -and [string]::IsNullOrWhiteSpace($AssetId)) {
+        throw "AssetId is required when automatic Unreal import is enabled."
+    }
+
+    if ($effectiveAutoImport -and -not (Test-Path -LiteralPath $UnrealImportRunner -PathType Leaf)) {
+        throw "Unreal import runner not found: $UnrealImportRunner"
+    }
+
+    return $result
+}
+
+$UnrealConfig = Resolve-UnrealImportConfiguration
 
 if (-not (Test-Path -LiteralPath $ComfyRunner -PathType Leaf)) {
     Write-Fail "ComfyUI runner not found: $ComfyRunner"
@@ -146,6 +217,16 @@ $PipelineMetadata = [ordered]@{
         baseZ = $null
         error = $null
     }
+    unreal = [ordered]@{
+        configured = [bool]$UnrealConfig.enabled
+        profilePath = $UnrealConfig.profilePath
+        autoImport = [bool]$UnrealConfig.autoImport
+        assetId = $AssetId
+        category = $Category
+        status = if ($UnrealConfig.enabled) { "pending" } else { "not-configured" }
+        importedObjectPaths = @()
+        error = $null
+    }
 }
 
 Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
@@ -158,6 +239,10 @@ Write-Info "PipelineId: $PipelineId"
 Write-Info "Prompt: $Prompt"
 Write-Info "Seed: $Seed"
 Write-Info "Target height: $TargetHeight m"
+if ($UnrealConfig.enabled) {
+    Write-Info "Project profile: $($UnrealConfig.profilePath)"
+    Write-Info "Automatic Unreal import: $($UnrealConfig.autoImport)"
+}
 Write-Info "Generating source image with ComfyUI..."
 
 $PipelineMetadata.comfyui.status = "running"
@@ -383,6 +468,73 @@ catch {
     Write-Fail $_.Exception.Message
     Write-Fail "Pipeline metadata: $PipelineMetadataPath"
     exit 1
+}
+
+if ($UnrealConfig.enabled) {
+    if ($UnrealConfig.autoImport) {
+        Write-Info "Importing FBX into Unreal..."
+
+        $PipelineMetadata.unreal.status = "running"
+        Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
+
+        try {
+            $previousErrorActionPreference = $ErrorActionPreference
+
+            try {
+                $ErrorActionPreference = "Continue"
+
+                $ImportOutput = & $UnrealImportRunner `
+                    -ProfilePath $UnrealConfig.profilePath `
+                    -FbxPath $FbxPath `
+                    -AssetId $AssetId `
+                    -Category $Category 6>&1 2>&1
+
+                $ImportExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+
+            foreach ($line in $ImportOutput) {
+                Write-Host $line
+            }
+
+            if ($ImportExitCode -ne 0) {
+                throw "Unreal import failed with exit code $ImportExitCode."
+            }
+
+            $ImportedPaths = @(
+                $ImportOutput |
+                    Where-Object { $_ -match '^\[OK\] Unreal asset: ' } |
+                    ForEach-Object {
+                        ($_ -replace '^\[OK\] Unreal asset:\s*', '').Trim()
+                    }
+            )
+
+            $PipelineMetadata.unreal.status = "completed"
+            $PipelineMetadata.unreal.importedObjectPaths = $ImportedPaths
+            $PipelineMetadata.unreal.error = $null
+            Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
+
+            Write-Ok "Automatic Unreal import completed"
+        }
+        catch {
+            $PipelineMetadata.status = "failed"
+            $PipelineMetadata.completedAt = (Get-Date).ToString("o")
+            $PipelineMetadata.unreal.status = "failed"
+            $PipelineMetadata.unreal.error = $_.Exception.Message
+            Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
+
+            Write-Fail $_.Exception.Message
+            Write-Fail "Pipeline metadata: $PipelineMetadataPath"
+            exit 1
+        }
+    }
+    else {
+        $PipelineMetadata.unreal.status = "skipped"
+        Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
+        Write-Info "Automatic Unreal import disabled. FBX kept for manual import."
+    }
 }
 
 Write-Ok "Image-to-3D pipeline completed"
