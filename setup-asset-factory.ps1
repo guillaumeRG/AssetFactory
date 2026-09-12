@@ -6,7 +6,7 @@ param(
 
     [Parameter(Position = 1)]
     [Alias("TriposrCommand", "ComfyUiCommand")]
-    [ValidateSet("install", "status", "doctor", "repair", "smoke")]
+    [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install")]
     [string]$EngineCommand = "status",
 
     [switch]$NoInstall
@@ -15,7 +15,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "0.5.2"
+$ScriptVersion = "0.5.3"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $MinimumPowerShellVersion = [version]"5.1"
 $Script:HadWarnings = $false
@@ -55,6 +55,13 @@ $ComfyUiTorchIndexUrl = "https://download.pytorch.org/whl/cu130"
 $ComfyUiExpectedTorchCuda = "13.0"
 $ComfyUiSmokeHost = "127.0.0.1"
 $ComfyUiSmokeTimeoutSeconds = 180
+
+# FLUX Schnell checkpoint used by the validated Asset Factory image workflow.
+# The model is intentionally not stored in Git because it is large runtime data.
+$ComfyUiFluxRepoId = "Comfy-Org/flux1-schnell"
+$ComfyUiFluxFileName = "flux1-schnell-fp8.safetensors"
+$ComfyUiFluxModelsDir = Join-Path $ComfyUiRoot "models\checkpoints"
+$ComfyUiFluxModelPath = Join-Path $ComfyUiFluxModelsDir $ComfyUiFluxFileName
 
 
 function Write-Header {
@@ -1946,6 +1953,145 @@ function Ensure-ComfyUiRequirements {
     Write-Result "OK" "ComfyUI requirements installed and validated"
 }
 
+function Test-ComfyUiFluxModel {
+    if (-not (Test-Path -LiteralPath $ComfyUiFluxModelPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            Present = $false
+            Path = $ComfyUiFluxModelPath
+            SizeBytes = 0
+            Message = "FLUX Schnell checkpoint is missing"
+        }
+    }
+
+    try {
+        $file = Get-Item -LiteralPath $ComfyUiFluxModelPath -ErrorAction Stop
+
+        if ($file.Length -lt 1GB) {
+            return [pscustomobject]@{
+                Present = $false
+                Path = $ComfyUiFluxModelPath
+                SizeBytes = $file.Length
+                Message = "FLUX Schnell checkpoint exists but is suspiciously small ($([math]::Round($file.Length / 1MB, 2)) MiB)"
+            }
+        }
+
+        return [pscustomobject]@{
+            Present = $true
+            Path = $ComfyUiFluxModelPath
+            SizeBytes = $file.Length
+            Message = "FLUX Schnell checkpoint present"
+        }
+    } catch {
+        return [pscustomobject]@{
+            Present = $false
+            Path = $ComfyUiFluxModelPath
+            SizeBytes = 0
+            Message = "Could not inspect FLUX Schnell checkpoint: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Ensure-ComfyUiHuggingFaceHub {
+    $probe = Invoke-ComfyUiPython -Arguments @(
+        "-c",
+        "import huggingface_hub; print(huggingface_hub.__version__)"
+    )
+
+    if ($probe.ExitCode -eq 0 -and $probe.Output.Count -gt 0) {
+        Write-Result "OK" "huggingface_hub $($probe.Output[0]) available in ComfyUI venv"
+        return
+    }
+
+    if ($NoInstall) {
+        throw "huggingface_hub is missing from the ComfyUI venv. -NoInstall prevents installation."
+    }
+
+    Write-Result "INFO" "Installing huggingface_hub in ComfyUI venv..."
+    $install = Invoke-ComfyUiPython -Arguments @(
+        "-m", "pip", "install", "huggingface_hub"
+    )
+
+    if ($install.ExitCode -ne 0) {
+        throw "Could not install huggingface_hub: $($install.Output -join ' | ')"
+    }
+
+    $verify = Invoke-ComfyUiPython -Arguments @(
+        "-c",
+        "import huggingface_hub; print(huggingface_hub.__version__)"
+    )
+
+    if ($verify.ExitCode -ne 0 -or $verify.Output.Count -eq 0) {
+        throw "huggingface_hub installation completed but import validation failed."
+    }
+
+    Write-Result "OK" "huggingface_hub $($verify.Output[0]) ready"
+}
+
+function Invoke-ComfyUiModelInstall {
+    Write-Header "ComfyUI Model Install"
+
+    if (-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) {
+        throw "ComfyUI venv is missing. Run '.\\setup-asset-factory.ps1 comfyui install' first."
+    }
+
+    $current = Test-ComfyUiFluxModel
+    if ($current.Present) {
+        $sizeGiB = [math]::Round($current.SizeBytes / 1GB, 2)
+        Write-Result "OK" "FLUX Schnell model already present: $($current.Path) ($sizeGiB GiB)"
+        return
+    }
+
+    if ($NoInstall) {
+        throw "$($current.Message). -NoInstall prevents downloading the model."
+    }
+
+    Ensure-ComfyUiHuggingFaceHub
+
+    if (-not (Test-Path -LiteralPath $ComfyUiFluxModelsDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $ComfyUiFluxModelsDir -Force | Out-Null
+    }
+
+    Write-Result "INFO" "Downloading $ComfyUiFluxFileName from $ComfyUiFluxRepoId..."
+    Write-Result "INFO" "The checkpoint is large. Rerunning this command can resume a Hugging Face download."
+
+    $code = @'
+import os
+import sys
+from huggingface_hub import hf_hub_download
+
+repo_id = sys.argv[1]
+filename = sys.argv[2]
+target_dir = sys.argv[3]
+
+os.makedirs(target_dir, exist_ok=True)
+path = hf_hub_download(
+    repo_id=repo_id,
+    filename=filename,
+    local_dir=target_dir,
+)
+print(path)
+'@
+
+    $download = Invoke-ComfyUiPython -Arguments @(
+        "-c", $code,
+        $ComfyUiFluxRepoId,
+        $ComfyUiFluxFileName,
+        $ComfyUiFluxModelsDir
+    )
+
+    if ($download.ExitCode -ne 0) {
+        throw "FLUX Schnell model download failed: $($download.Output -join ' | ')"
+    }
+
+    $verify = Test-ComfyUiFluxModel
+    if (-not $verify.Present) {
+        throw "Model download completed but validation failed: $($verify.Message)"
+    }
+
+    $sizeGiB = [math]::Round($verify.SizeBytes / 1GB, 2)
+    Write-Result "OK" "FLUX Schnell model ready: $($verify.Path) ($sizeGiB GiB)"
+}
+
 function Test-ComfyUiRuntime {
     $torch = Get-ComfyUiTorchInfo
     if (-not $torch.Available) {
@@ -2044,6 +2190,14 @@ function Show-ComfyUiStatus {
         }
     } else {
         Write-Result "MISSING" "ComfyUI isolated venv"
+    }
+
+    $fluxModel = Test-ComfyUiFluxModel
+    if ($fluxModel.Present) {
+        $sizeGiB = [math]::Round($fluxModel.SizeBytes / 1GB, 2)
+        Write-Result "OK" "FLUX Schnell model: $($fluxModel.Path) ($sizeGiB GiB)"
+    } else {
+        Write-Result "MISSING" "$($fluxModel.Message). Run .\setup-asset-factory.ps1 comfyui model-install"
     }
 
     if (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf) {
@@ -2283,6 +2437,7 @@ function Invoke-ComfyUiCommand {
             if ($exitCode -ne 0) { exit $exitCode }
         }
         "smoke"   { Invoke-ComfyUiSmokeTest }
+        "model-install" { Invoke-ComfyUiModelInstall }
         "repair"  {
             Write-Result "INFO" "ComfyUI repair uses the idempotent install/revalidation path."
             Invoke-ComfyUiInstall
@@ -2365,6 +2520,14 @@ function Show-Status {
         Write-Result "INFO" "ComfyUI not installed; run .\setup-asset-factory.ps1 comfyui install"
     } else {
         Write-Result "WARN" "ComfyUI repository state: $($comfyRepoState.Message)"
+    }
+
+    $fluxModel = Test-ComfyUiFluxModel
+    if ($fluxModel.Present) {
+        $sizeGiB = [math]::Round($fluxModel.SizeBytes / 1GB, 2)
+        Write-Result "OK" "FLUX Schnell model installed ($sizeGiB GiB)"
+    } else {
+        Write-Result "INFO" "FLUX Schnell model not ready; run .\setup-asset-factory.ps1 comfyui model-install"
     }
 }
 
@@ -2553,6 +2716,7 @@ Usage:
   .\setup-asset-factory.ps1 comfyui doctor
   .\setup-asset-factory.ps1 comfyui smoke
   .\setup-asset-factory.ps1 comfyui repair
+  .\setup-asset-factory.ps1 comfyui model-install
   .\setup-asset-factory.ps1 help
 
 Commands:
@@ -2561,7 +2725,7 @@ Commands:
   status    Show detected tools, paths, versions, repository state and GPU information.
   doctor    Run smoke tests for Git, Python, Blender headless, GPU query and repository structure.
   triposr   Manage the isolated TripoSR engine. Subcommands: install, status, doctor, repair, smoke.
-  comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair.
+  comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair, model-install.
   help      Show this help.
 
 Options:
@@ -2571,6 +2735,7 @@ Important:
   - This bootstrap targets Windows 11 and requires Windows PowerShell 5.1+ or PowerShell 7+.
   - TripoSR is opt-in: use `triposr install`; it never installs packages into global Python.
   - ComfyUI is opt-in: use `comfyui install`; it uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
+  - The FLUX Schnell checkpoint is opt-in: use `comfyui model-install`; an existing valid checkpoint is reused.
   - Engine repositories, venvs, downloaded models and generated outputs are local runtime data, not repository source.
   - Each AI engine uses an isolated Python environment.
   - Heavy GPU workloads must remain sequential on the ~8 GiB target GPU.
