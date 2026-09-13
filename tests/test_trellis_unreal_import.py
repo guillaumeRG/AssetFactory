@@ -83,6 +83,7 @@ def make_unreal(modern=True):
     unreal.logs = []
     unreal.assets = {}
     unreal.saved = []
+    unreal.directories = set()
     unreal.no_objects = False
     unreal.material_only = False
     unreal.result_paths_only = False
@@ -138,8 +139,19 @@ def make_unreal(modern=True):
 
     unreal.AssetToolsHelpers = types.SimpleNamespace(
         get_asset_tools=lambda: types.SimpleNamespace(import_asset_tasks=import_tasks))
+    def does_directory_exist(path):
+        return path in unreal.directories
+
+    def list_assets(path, recursive=True, include_folder=False):
+        prefix = path.rstrip('/') + '/'
+        return [asset_path for asset_path in unreal.assets if asset_path.startswith(prefix)]
+
     unreal.EditorAssetLibrary = types.SimpleNamespace(
-        load_asset=lambda path: unreal.assets.get(path), save_asset=save_asset)
+        load_asset=lambda path: unreal.assets.get(path),
+        save_asset=save_asset,
+        does_directory_exist=does_directory_exist,
+        list_assets=list_assets,
+    )
     return unreal
 
 
@@ -155,11 +167,13 @@ def loaded(monkeypatch):
     return load
 
 
-def make_job(tmp_path, monkeypatch, extension='.glb', legacy=False, settings=None, asset_id='chair'):
+def make_job(tmp_path, monkeypatch, extension='.glb', legacy=False, settings=None,
+             asset_id='chair', version='', overwrite=False):
     source = tmp_path/('chair.v2' + extension)
     source.write_bytes(b'fixture: mock importer does not parse geometry')
     job = dict(status='running', assetId=asset_id, category='Furniture/Seats',
                contentRoot='/Game/AssetFactory', importSettings=settings or {},
+               requestedAssetVersion=version or None, overwriteExistingVersion=overwrite,
                error=None, importedObjectPaths=[])
     job['fbxPath' if legacy else 'sourcePath'] = str(source)
     path = tmp_path/'job.json'
@@ -177,7 +191,8 @@ def test_glb_import_uses_interchange_and_saves_real_objects(loaded, tmp_path, mo
     result = json.loads(path.read_text())
     assert result['status'] == 'completed'
     assert result['importer'] == 'interchange-glb'
-    assert result['destinationPath'] == '/Game/AssetFactory/Furniture/Seats/chair'
+    assert result['destinationPath'] == '/Game/AssetFactory/Furniture/Seats/chair/v001'
+    assert result['assetVersion'] == 'v001'
     assert len(result['meshObjectPaths']) == 1
     assert len(result['importedObjectPaths']) == len(fake.saved) == 3
     task = fake.calls[0]
@@ -214,7 +229,8 @@ def test_legacy_fbx_job_and_options_preserved(loaded, tmp_path, monkeypatch):
     mod.main()
     result = json.loads(path.read_text())
     assert result['status'] == 'completed' and result['importer'] == 'fbx'
-    assert result['destinationPath'] == '/Game/AssetFactory/Furniture/Seats'
+    assert result['destinationPath'] == '/Game/AssetFactory/Furniture/Seats/chair/v001'
+    assert result['assetVersion'] == 'v001'
     opts = fake.calls[0].properties['options']
     assert isinstance(opts, FbxOptions)
     assert opts.properties['import_materials'] is False
@@ -225,11 +241,43 @@ def test_legacy_fbx_job_and_options_preserved(loaded, tmp_path, monkeypatch):
         combine_meshes=True, generate_lightmap_u_vs=True, auto_generate_collision=True)
 
 
-def test_optional_subfolder_can_be_disabled(loaded, tmp_path, monkeypatch):
+def test_requested_version_is_used_when_free(loaded, tmp_path, monkeypatch):
     mod, _ = loaded()
-    path, _ = make_job(tmp_path, monkeypatch, settings={'assetSubfolder': False})
+    path, _ = make_job(tmp_path, monkeypatch, version='v007')
     mod.main()
-    assert json.loads(path.read_text())['destinationPath'] == '/Game/AssetFactory/Furniture/Seats'
+    result = json.loads(path.read_text())
+    assert result['assetVersion'] == 'v007'
+    assert result['destinationPath'].endswith('/chair/v007')
+
+
+def test_occupied_requested_version_increments_without_overwrite(loaded, tmp_path, monkeypatch):
+    mod, fake = loaded()
+    fake.directories.add('/Game/AssetFactory/Furniture/Seats/chair/v001')
+    path, _ = make_job(tmp_path, monkeypatch, version='v001')
+    mod.main()
+    result = json.loads(path.read_text())
+    assert result['requestedAssetVersion'] == 'v001'
+    assert result['assetVersion'] == 'v002'
+    assert result['destinationPath'].endswith('/chair/v002')
+
+
+def test_occupied_requested_version_can_be_explicitly_reused(loaded, tmp_path, monkeypatch):
+    mod, fake = loaded()
+    fake.directories.add('/Game/AssetFactory/Furniture/Seats/chair/v003')
+    path, _ = make_job(tmp_path, monkeypatch, version='v003', overwrite=True)
+    mod.main()
+    result = json.loads(path.read_text())
+    assert result['assetVersion'] == 'v003'
+    assert result['overwriteExistingVersion'] is True
+
+
+def test_version_allocator_skips_existing_versions(loaded):
+    mod, fake = loaded()
+    base = '/Game/AssetFactory/Furniture/Seats/chair'
+    fake.directories.update({base + '/v001', base + '/v002', base + '/v004'})
+    assert mod.resolve_asset_version(base) == 'v003'
+    assert mod.resolve_asset_version(base, 'v002') == 'v003'
+
 
 
 @pytest.mark.parametrize('failure, message', [('no_objects','no imported object'),

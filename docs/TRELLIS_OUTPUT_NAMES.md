@@ -1,30 +1,29 @@
-# TRELLIS - noms des sorties bases sur l'image
+# TRELLIS - nommage et emplacement des sorties
 
-Correctif cible sur le pack hors ligne v0.6.23.
-
-Extraire a la racine d'AssetFactory. Les deux fichiers de production remplaces sont :
-- tools/run-trellis.ps1
-- tools/run_trellis.py
-
-Le reste du pack v0.6.23 reste necessaire et inchange.
-Aucune reinstallation ni aucun telechargement de modele n'est necessaire.
+Le runner TRELLIS utilise l'identifiant de l'asset comme nom de fichier.
 
 Exemples :
-- chair.png -> chair.glb
-- FuelTank_T1.png -> FuelTank_T1.glb
-- chair.v2.png -> chair.v2.glb
 
-Les PLY optionnels suivent la meme convention. Le dossier de sortie horodate
-et tous les parametres existants sont conserves. Les anciens exports ne sont
-ni renommes ni supprimes. Aucune modification du code moteur ou du setup.
+```text
+chair.png + AssetId chair           -> chair.glb
+crate.png + AssetId WoodenCrate_01  -> WoodenCrate_01.glb
+```
 
-Commande inchangee :
-    .\tools\run-trellis.ps1 -InputPath ".\engines\triposr\examples\chair.png"
+Dans le pipeline complet, le GLB brut et le GLB final sont séparés :
 
-Import automatique : NON CORRIGE dans ce pack. Le runner disponible ne contient
-aucun appel a un importeur. Le code de l'import automatique existant est requis
-pour l'integrer sans inventer une seconde architecture.
+```text
+outputs/assets/WoodenCrate_01/v001/raw/WoodenCrate_01.glb
+outputs/assets/WoodenCrate_01/v001/final/WoodenCrate_01.glb
+```
 
-Validation locale : 25 tests reussis (17 tests hors ligne existants et 8 nouveaux
-tests de nommage). L'inference et l'export des tests de nommage sont simules.
-Le test PowerShell est statique, pas une execution Windows/Unreal/CUDA.
+Une nouvelle génération crée une nouvelle version (`v002`, `v003`, ...), sans remplacer la précédente.
+
+Le PLY optionnel suit le même nom de base et reste dans `raw/`.
+
+Le runner peut toujours être appelé directement :
+
+```powershell
+.\tools\run-trellis.ps1 -InputPath ".\reference.png" -AssetId "WoodenCrate_01"
+```
+
+Les sources de TRELLIS sous `engines/trellis` ne sont pas modifiées par ce mécanisme.

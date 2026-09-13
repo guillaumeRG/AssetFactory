@@ -141,7 +141,7 @@ class ModelBundleTests(unittest.TestCase):
             text=True, capture_output=True, timeout=20, env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("no generation", result.stdout)
+        self.assertIn("aucune génération", result.stdout)
 
     def test_missing_check_cli_has_actionable_failure(self):
         (self.root / "rembg/u2net.onnx").unlink()

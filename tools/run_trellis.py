@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +13,48 @@ from trellis_offline import configure_offline, check_local_models, load_local_pi
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _prepare_native_runtime() -> dict[str, object]:
+    """Verifie les outils natifs necessaires aux compilations JIT de cumm/spconv."""
+    scripts_dir = Path(sys.executable).resolve().parent
+    current_path = os.environ.get("PATH", "")
+    entries = [entry for entry in current_path.split(os.pathsep) if entry]
+    if not any(Path(entry).resolve() == scripts_dir for entry in entries if Path(entry).exists()):
+        os.environ["PATH"] = str(scripts_dir) + (os.pathsep + current_path if current_path else "")
+
+    required = {"ninja": "ninja"}
+    if os.name == "nt":
+        required.update(
+            {
+                "cl": "compilateur MSVC cl.exe",
+                "nvcc": "compilateur CUDA nvcc.exe",
+            }
+        )
+    resolved: dict[str, object] = {}
+    for command, label in required.items():
+        executable = shutil.which(command)
+        if executable is None:
+            raise RuntimeError(
+                f"Outil natif TRELLIS introuvable : {label}. "
+                "Le runner doit initialiser Visual Studio 2022 et CUDA 13.4 avant l'inference. "
+                "Relancez '.\\setup-asset-factory.ps1 trellis runtime-install' si le probleme persiste."
+            )
+        resolved[command] = Path(executable).resolve()
+
+    try:
+        ninja_path = Path(str(resolved["ninja"]))
+        ninja_version = subprocess.run(
+            [str(ninja_path), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if ninja_version:
+            resolved["ninja_version"] = ninja_version
+    except Exception:
+        pass
+    return resolved
 
 
 def _prepare_imports() -> tuple[Path, Path]:
@@ -96,6 +140,7 @@ def _self_test() -> int:
 
 def _run(args: argparse.Namespace) -> int:
     _, trellis_root = _prepare_imports()
+    native_tools = _prepare_native_runtime()
 
     import torch
     import xformers
@@ -116,14 +161,21 @@ def _run(args: argparse.Namespace) -> int:
     if not input_path.is_file():
         raise FileNotFoundError(f"Input image does not exist: {input_path}")
 
-    print(f"[INFO] TRELLIS root: {trellis_root}")
-    print(f"[INFO] Input: {input_path}")
-    print(f"[INFO] Output: {output_glb}")
-    print("[INFO] Dense attention: PyTorch SDPA")
-    print("[INFO] Sparse attention: Asset Factory xFormers-API shim -> PyTorch SDPA")
-    print(f"[INFO] GPU: {torch.cuda.get_device_name(0)}")
-    print("[INFO] Network mode: OFFLINE (local models only)")
-    print(f"[INFO] Models: {args.models_dir}")
+    print(f"[INFO] Racine TRELLIS : {trellis_root}")
+    print(f"[INFO] Entrée : {input_path}")
+    print(f"[INFO] Sortie : {output_glb}")
+    print("[INFO] Attention dense : PyTorch SDPA")
+    print("[INFO] Attention creuse : shim API xFormers Asset Factory -> PyTorch SDPA")
+    print(f"[INFO] GPU : {torch.cuda.get_device_name(0)}")
+    print(f"[INFO] Outil de build Ninja : {native_tools['ninja']}")
+    if "ninja_version" in native_tools:
+        print(f"[INFO] Version Ninja : {native_tools['ninja_version']}")
+    if "cl" in native_tools:
+        print(f"[INFO] Compilateur natif MSVC : {native_tools['cl']}")
+    if "nvcc" in native_tools:
+        print(f"[INFO] Compilateur natif CUDA : {native_tools['nvcc']}")
+    print("[INFO] Mode réseau : HORS LIGNE (modèles locaux uniquement)")
+    print(f"[INFO] Modèles : {args.models_dir}")
 
     pipeline = load_local_pipeline(args.models_dir)
     pipeline.cuda()
@@ -152,12 +204,12 @@ def _run(args: argparse.Namespace) -> int:
     if args.save_ply:
         output_ply = output_dir / (input_path.stem + ".ply")
         outputs["gaussian"][0].save_ply(str(output_ply))
-        print(f"[OK] PLY: {output_ply}")
+        print(f"[OK] PLY : {output_ply}")
 
     if not output_glb.is_file() or output_glb.stat().st_size <= 0:
         raise RuntimeError(f"TRELLIS completed but no valid GLB was produced: {output_glb}")
 
-    print(f"[OK] GLB: {output_glb}")
+    print(f"[OK] GLB : {output_glb}")
     return 0
 
 
@@ -192,7 +244,7 @@ def main() -> int:
         return _self_test()
     check_local_models(args.models_dir)
     if args.check_models:
-        print("[OK] Local model check passed; no generation was started.")
+        print("[OK] Vérification des modèles locaux réussie ; aucune génération n’a été lancée.")
         return 0
     return _run(args)
 
@@ -201,7 +253,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        print("[FAIL] Interrupted", file=sys.stderr)
+        print("[FAIL] Interrompu", file=sys.stderr)
         raise SystemExit(130)
     except Exception as exc:
         print(f"[FAIL] {type(exc).__name__}: {exc}", file=sys.stderr)

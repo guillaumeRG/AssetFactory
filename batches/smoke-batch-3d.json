@@ -10,6 +10,7 @@
   ],
   "mode": "full",
   "engine": "trellis",
-  "projectProfile": "profiles/nullon.json",
+  "projectProfile": "",
+  "autoImport": false,
   "targetHeight": 1.0
 }

@@ -1,6 +1,5 @@
-"""Vérifications statiques du passage PowerShell ; ce ne sont PAS des tests d'exécution."""
+"""Vérifications statiques du passage PowerShell ; aucun moteur réel n'est exécuté."""
 from pathlib import Path
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = (ROOT/'tools/run-trellis.ps1').read_text(encoding='utf-8-sig')
@@ -8,7 +7,7 @@ IMPORTER = (ROOT/'tools/import-unreal.ps1').read_text(encoding='utf-8-sig')
 
 
 def test_runner_has_profile_override_parameters():
-    for token in ('$ProjectProfile', '$AssetId', '$Category', '[System.Nullable[bool]]$AutoImport = $null'):
+    for token in ('$ProjectProfile', '$AssetId', '$AssetVersion', '$Category', '[System.Nullable[bool]]$AutoImport = $null'):
         assert token in RUNNER
     assert '$effectiveAutoImport = [bool]$profile.autoImport' in RUNNER
     assert '$effectiveAutoImport = [bool]$AutoImport' in RUNNER
@@ -16,8 +15,8 @@ def test_runner_has_profile_override_parameters():
 
 def test_handoff_follows_successful_generation_and_glb_validation():
     call = RUNNER.index('& $UnrealImportRunner')
-    assert RUNNER.index('& $TrellisPython @arguments') < RUNNER.index('TRELLIS GLB generated:') < call
-    assert '-SourcePath $glb' in RUNNER
+    assert RUNNER.index('& $TrellisPython @arguments') < RUNNER.index('GLB TRELLIS généré :') < call
+    assert 'SourcePath = $glb' in RUNNER
     assert 'if ($unrealConfig.autoImport)' in RUNNER
 
 
@@ -52,13 +51,21 @@ def test_legacy_fbx_parameter_and_job_field_remain():
 def test_glb_defaults_and_optional_profile_overrides():
     assert 'importMaterials = $IsGlb' in IMPORTER
     assert 'importTextures = $IsGlb' in IMPORTER
-    assert 'assetSubfolder = $IsGlb' in IMPORTER
     assert '$settingsBlocks = @("import")' in IMPORTER
     assert '$settingsBlocks += "importGlb"' in IMPORTER
+    assert 'assetSubfolder' not in IMPORTER
+
+
+def test_unreal_versions_are_preserved_by_default():
+    assert '$OverwriteExistingVersion = $false' in IMPORTER
+    assert 'overwriteExistingVersion = $OverwriteExistingVersion' in IMPORTER
+    assert 'requestedAssetVersion' in IMPORTER
+    assert 'Existing versions are preserved by default.' in IMPORTER
 
 
 def test_wrapper_records_failures_and_preserves_result_contract():
     assert '$result.status = "failed"' in IMPORTER
     assert 'Write-Ok "Unreal asset: $objectPath"' in IMPORTER
+    assert 'Write-Ok "Unreal version: $($result.assetVersion)"' in IMPORTER
     assert 'Write-Ok "Import metadata: $JobPath"' in IMPORTER
     assert 'Remove-Item -LiteralPath $ResolvedSourcePath' not in IMPORTER

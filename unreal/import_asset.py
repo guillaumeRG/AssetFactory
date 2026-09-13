@@ -52,6 +52,44 @@ def sanitize_category(value):
     return "/".join(parts)
 
 
+def sanitize_asset_version(value):
+    if value is None or str(value).strip() == "":
+        return ""
+    version = str(value).strip().lower()
+    if not re.fullmatch(r"v[0-9]{3,}", version):
+        raise ValueError(
+            f"assetVersion must use the form v001, v002, ...; got: {value}"
+        )
+    return version
+
+
+def directory_is_occupied(path):
+    library = unreal.EditorAssetLibrary
+    if hasattr(library, "does_directory_exist") and library.does_directory_exist(path):
+        return True
+    if hasattr(library, "list_assets"):
+        return bool(library.list_assets(path, recursive=True, include_folder=False))
+    return False
+
+
+def resolve_asset_version(base_path, requested_version="", overwrite_existing=False):
+    """Choisit une version Unreal sans écraser une génération précédente par défaut."""
+    requested = sanitize_asset_version(requested_version)
+    if requested:
+        requested_path = f"{base_path}/{requested}"
+        if overwrite_existing or not directory_is_occupied(requested_path):
+            return requested
+        start = int(requested[1:]) + 1
+    else:
+        start = 1
+
+    for number in range(start, 1000000):
+        candidate = f"v{number:03d}"
+        if not directory_is_occupied(f"{base_path}/{candidate}"):
+            return candidate
+    raise RuntimeError(f"No free asset version could be allocated under: {base_path}")
+
+
 def make_fbx_options(settings):
     options = unreal.FbxImportUI()
     safe_set(options, "import_mesh", True)
@@ -225,9 +263,10 @@ def main():
         job["sourcePath"] = source_path
         job["sourceFormat"] = extension.lstrip(".")
 
-        destination_path = content_root
+        asset_base_path = content_root
         if category:
-            destination_path += "/" + category
+            asset_base_path += "/" + category
+        asset_base_path += "/" + asset_id
 
         settings = job.get("importSettings", {})
         if not isinstance(settings, dict):
@@ -235,8 +274,18 @@ def main():
         for name, value in settings.items():
             if not isinstance(value, bool):
                 raise ValueError(f"importSettings.{name} must be a JSON boolean.")
-        if settings.get("assetSubfolder", extension == ".glb"):
-            destination_path += "/" + asset_id
+
+        overwrite_existing_version = job.get("overwriteExistingVersion", False)
+        if not isinstance(overwrite_existing_version, bool):
+            raise ValueError("overwriteExistingVersion must be a JSON boolean.")
+        requested_version = job.get("requestedAssetVersion") or job.get("assetVersion") or ""
+        asset_version = resolve_asset_version(
+            asset_base_path, requested_version, overwrite_existing_version
+        )
+        destination_path = f"{asset_base_path}/{asset_version}"
+        job["requestedAssetVersion"] = sanitize_asset_version(requested_version) or None
+        job["assetVersion"] = asset_version
+        job["overwriteExistingVersion"] = overwrite_existing_version
 
         task = unreal.AssetImportTask()
         task.set_editor_property("filename", source_path)

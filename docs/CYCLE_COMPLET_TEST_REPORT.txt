@@ -1,37 +1,27 @@
-Asset Factory - dual-engine full cycle v1
+Asset Factory - validation de la refonte des sorties et du cycle complet
 
-TESTS ACTUALLY EXECUTED IN THE DELIVERY ENVIRONMENT
-Python: 3.13.5
-Command: python -m pytest tests -q
+TESTS EXECUTES DANS L'ENVIRONNEMENT DE LIVRAISON
+Python : 3.13.5
+Commande : python3 -B -m pytest -q
 
-........................................................... [ 63%]
-..................................                                       [100%]
-93 passed, 13 subtests passed in 1.87s
+102 tests réussis, 13 sous-tests réussis.
 
-Python syntax: all project .py files compile successfully.
+COUVERTURE PRINCIPALE
+- structure versionnée outputs/assets/<AssetId>/vNNN ;
+- conservation des générations précédentes ;
+- sélection TRELLIS / TripoSR ;
+- normalisation Blender simulée ;
+- import Unreal simulé ;
+- versionnement Unreal et incrément automatique d'une version déjà occupée ;
+- chargement hors ligne TRELLIS ;
+- nommage PNG/GLB ;
+- contrats statiques PowerShell et profils génériques.
 
-SCOPE
-- 15 static PowerShell/profile/contract inspections (not PowerShell execution).
-- 19 Blender-processing unit tests using simulated bpy/bmesh/mathutils.
-- 17 offline-helper regression tests (models/inference simulated).
-- 8 PNG/GLB naming regression tests (inference simulated).
-- 34 previous Unreal-autoimport regression tests (Unreal mocked + static contracts).
+NON EXECUTE DANS CET ENVIRONNEMENT
+- exécution PowerShell réelle : pwsh/powershell n'est pas installé ici ;
+- tests/test-cycle-contracts.ps1 : fourni pour la machine Windows cible ;
+- inférence réelle ComfyUI, TRELLIS ou TripoSR ;
+- exécution réelle de Blender ;
+- import réel avec UnrealEditor-Cmd.
 
-NOT EXECUTED HERE
-- PowerShell parser/runtime: pwsh/powershell is not installed in this environment.
-- tests/test-cycle-contracts.ps1: included for the target Windows machine; not run here.
-- Actual Blender OBJ/GLB round-trip, embedded-image visual fidelity and exported units.
-- ComfyUI API/GPU memory unloading on the user's server.
-- TRELLIS/TripoSR inference on the RTX 5060 Ti.
-- Real UnrealEditor-Cmd import into NullOn.
-
-UNCHANGED AGAINST THE USER'S source.zip
-- tools/run-comfyui.ps1
-- tools/run-triposr.ps1
-- tools/run_trellis.py
-- tools/trellis_models.py
-- tools/trellis_offline.py
-- tools/trellis_compat/xformers and its ops (source files)
-
-The ZIP contains no engine checkout, installed package or model weights.
-The setup is not changed or rerun. Windows native validation remains required.
+Les tests Python utilisent des simulations lorsque Blender, Unreal ou les moteurs GPU sont nécessaires.

@@ -3,8 +3,9 @@
   "engine": "unreal",
   "autoImport": false,
   "projectPath": "C:\\path\\to\\YourProject.uproject",
-  "contentRoot": "/Game/Assets/Generated",
+  "contentRoot": "/Game/AssetFactory",
   "unrealEditorCmd": null,
+  "overwriteExistingVersion": false,
   "import": {
     "replaceExisting": true,
     "importMaterials": false,
@@ -15,7 +16,6 @@
   },
   "importGlb": {
     "importMaterials": true,
-    "importTextures": true,
-    "assetSubfolder": true
+    "importTextures": true
   }
 }

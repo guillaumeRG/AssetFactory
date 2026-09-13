@@ -1,12 +1,12 @@
-# Asset Factory
+# Asset Factory V0.7
 
-Asset Factory est une chaîne locale de génération et de préparation d'assets 3D à partir d'un prompt texte.
+Asset Factory est une chaîne de génération et de préparation locale d'assets 3D à partir d'un prompt texte.
 
 Le but est simple :
 
 ```text
 Prompt
-  -> image générée par IA
+  -> image générée par prompt
   -> génération 3D
   -> normalisation dans Blender
   -> import optionnel dans Unreal Engine
@@ -24,16 +24,23 @@ Le moteur peut être choisi à chaque génération avec `-Engine trellis` ou `-E
 
 ## Aperçu rapide
 
-Exemple de résultat obtenu avec la chaîne complète : image de référence -> asset 3D généré -> import dans Unreal Engine.
+Exemples de résultats obtenu avec la chaîne complète/partiel d'Asset Factory V0.7: prompt -> image de référence -> asset 3D généré -> import dans Unreal Engine.
 
 <table>
   <tr>
+    <td align="center"><strong>Prompt</strong></td>
     <td align="center"><strong>Image de référence</strong></td>
     <td align="center"><strong>Asset importé dans Unreal Engine</strong></td>
   </tr>
   <tr>
+    <td align="center">/</td>
     <td align="center"><img src="docs/images/demo-chair-reference.png" alt="Chaise de référence" width="260"></td>
     <td align="center"><img src="docs/images/demo-chair-unreal.png" alt="Chaise générée et importée dans Unreal Engine" width="260"></td>
+  </tr>
+  <tr>
+    <td align="center">A compact industrial spaceship fuel tank, single isolated object, realistic hard-surface design, short vertical cylindrical body with rounded end caps, sturdy metal construction, slightly worn off-white painted surface, subtle scratches and edge wear, two dark metal support bands around the tank, small red valve and simple pipe connector on top, a few technical details but clean overall silhouette, functional utilitarian design, fully visible, centered, three-quarter view, neutral plain light gray background, soft studio lighting, even exposure, clear readable shape, realistic product render, no environment, no text, no logo, no character.</td>
+    <td align="center"><img src="docs/images/FuelTank_01.png" width="260"></td>
+    <td align="center"><img src="docs/images/fuel_tank_3d.png" width="260"><img src="docs/images/fuel_tank_3d2.png" width="260"></td>
   </tr>
 </table>
 
@@ -91,8 +98,6 @@ Vérifier l'installation :
 .\setup-asset-factory.ps1 status
 .\setup-asset-factory.ps1 doctor
 ```
-
-Les commandes d'installation sont prévues pour être **idempotentes** : les composants déjà installés et valides sont réutilisés.
 
 ---
 
@@ -224,23 +229,6 @@ Exemple :
 
 Le profil contient les chemins et options propres au projet consommateur. Asset Factory ne contient aucune règle spécifique à un jeu ou à un produit particulier.
 
-Pour TRELLIS, les GLB sont importés avec leurs matériaux et textures lorsque le profil le permet.
-
-### Important : éditeur Unreal déjà ouvert
-
-L'import automatique utilise `UnrealEditor-Cmd`.
-
-Si Unreal Editor est déjà ouvert pendant l'import, les fichiers `.uasset` peuvent être créés correctement sur disque sans apparaître immédiatement dans le Content Browser de l'éditeur déjà lancé.
-
-Dans ce cas :
-
-1. vérifier que les `.uasset` existent dans le dossier `Content` du projet ;
-2. fermer Unreal Editor ;
-3. rouvrir le projet.
-
-Les assets importés apparaîtront alors dans le Content Browser.
-
----
 
 ## 7. Générer uniquement une image
 
@@ -309,8 +297,6 @@ Avec TripoSR :
 ```
 
 Les traitements GPU lourds sont exécutés séquentiellement afin de limiter les conflits de VRAM.
-
-Les anciens batches d'images peuvent rester en mode image uniquement. Le mode 3D complet doit être demandé explicitement lorsqu'il n'est pas défini dans le manifeste.
 
 ---
 
@@ -438,7 +424,4 @@ AssetFactory/
 ├─ setup-asset-factory.ps1
 └─ README.md
 ```
-
-Les dossiers contenant les moteurs, modèles lourds et sorties de génération doivent rester hors Git lorsqu'ils sont déjà couverts par les règles du dépôt.
-
 ---

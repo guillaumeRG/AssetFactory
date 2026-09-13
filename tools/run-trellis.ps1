@@ -4,6 +4,8 @@ param(
     [string]$InputPath,
 
     [string]$OutputDir,
+    [string]$GenerationRoot = "",
+    [string]$AssetVersion = "",
     [string]$ModelsDir,
     [ValidateRange(0, [long]::MaxValue)]
     [long]$Seed = 1,
@@ -18,18 +20,202 @@ param(
 
     [string]$AssetId = "",
     [string]$Category = "",
-    [System.Nullable[bool]]$AutoImport = $null
+    [System.Nullable[bool]]$AutoImport = $null,
+    [switch]$PipelineManaged
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot "pipeline-common.ps1")
 $TrellisRoot = Join-Path $AssetFactoryRoot "engines\trellis"
 $TrellisPython = Join-Path $TrellisRoot ".venv-runtime\Scripts\python.exe"
 $Adapter = Join-Path $PSScriptRoot "run_trellis.py"
 $CompatRoot = Join-Path $PSScriptRoot "trellis_compat"
 $UnrealImportRunner = Join-Path $PSScriptRoot "import-unreal.ps1"
+
+function Get-TrellisVs2022Toolchain {
+    $pf86 = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ProgramFilesX86)
+    if ([string]::IsNullOrWhiteSpace($pf86)) {
+        throw "Impossible de localiser Program Files (x86) pour detecter Visual Studio 2022."
+    }
+
+    $vs2022Root = Join-Path $pf86 "Microsoft Visual Studio\2022"
+    if (-not (Test-Path -LiteralPath $vs2022Root -PathType Container)) {
+        throw "Visual Studio 2022 avec les outils C++ est requis pour TRELLIS. Lancez '.\setup-asset-factory.ps1 trellis runtime-install'."
+    }
+
+    $roots = @(Get-ChildItem -LiteralPath $vs2022Root -Directory -ErrorAction SilentlyContinue)
+    foreach ($root in $roots) {
+        $vcvars = Join-Path $root.FullName "VC\Auxiliary\Build\vcvars64.bat"
+        $msvcRoot = Join-Path $root.FullName "VC\Tools\MSVC"
+        if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $msvcRoot -PathType Container)) {
+            continue
+        }
+
+        $toolsets = @(Get-ChildItem -LiteralPath $msvcRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+        foreach ($toolset in $toolsets) {
+            $cl = Join-Path $toolset.FullName "bin\Hostx64\x64\cl.exe"
+            if (Test-Path -LiteralPath $cl -PathType Leaf) {
+                return [pscustomobject]@{
+                    VsRoot = $root.FullName
+                    Edition = $root.Name
+                    Toolset = $toolset.Name
+                    ClPath = $cl
+                    VcVarsPath = $vcvars
+                }
+            }
+        }
+    }
+
+    throw "Visual Studio 2022 C++ Build Tools (cl.exe) est introuvable. Lancez '.\setup-asset-factory.ps1 trellis runtime-install'."
+}
+
+function Import-TrellisVs2022Environment {
+    param([Parameter(Mandatory)]$Toolchain)
+
+    $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
+    if (-not (Test-Path -LiteralPath $cmd -PathType Leaf)) {
+        throw "cmd.exe est requis pour initialiser l'environnement de compilation Visual Studio 2022."
+    }
+
+    # vcvars64.bat doit etre execute dans un environnement enfant propre. Cela evite
+    # d'heriter d'anciennes variables Visual Studio/CUDA susceptibles de depasser la
+    # longueur maximale de ligne de cmd.exe ou de selectionner un autre toolset.
+    $wrapper = Join-Path ([System.IO.Path]::GetTempPath()) ("asset-factory-vsenv-" + [guid]::NewGuid().ToString("N") + ".cmd")
+    $wrapperLines = @(
+        "@echo off",
+        ("call `"{0}`" >nul" -f $Toolchain.VcVarsPath),
+        "if errorlevel 1 exit /b %errorlevel%",
+        "set"
+    )
+    [System.IO.File]::WriteAllLines($wrapper, $wrapperLines, [System.Text.Encoding]::ASCII)
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $cmd
+    $psi.Arguments = "/d /c `"$wrapper`""
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.EnvironmentVariables.Clear()
+
+    $cleanVars = @(
+        "SystemRoot", "WINDIR", "SystemDrive", "ComSpec",
+        "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData",
+        "LOCALAPPDATA", "APPDATA",
+        "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+        "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "NUMBER_OF_PROCESSORS",
+        "OS", "PATHEXT"
+    )
+
+    foreach ($name in $cleanVars) {
+        $value = [System.Environment]::GetEnvironmentVariable($name, "Process")
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $psi.EnvironmentVariables[$name] = $value
+        }
+    }
+
+    $psi.EnvironmentVariables["PATH"] = @(
+        (Join-Path $env:SystemRoot "System32"),
+        $env:SystemRoot,
+        (Join-Path $env:SystemRoot "System32\Wbem"),
+        (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0")
+    ) -join ";"
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    try {
+        if (-not $process.Start()) {
+            throw "Impossible de demarrer cmd.exe pour initialiser Visual Studio 2022."
+        }
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+    } finally {
+        if ($process) { $process.Dispose() }
+        Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -ne 0) {
+        $detail = (($stdout + [Environment]::NewLine + $stderr) -split "`r?`n" |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join " | "
+        throw "Impossible d'initialiser l'environnement Visual Studio 2022 : $detail"
+    }
+
+    $allowed = @(
+        "PATH", "INCLUDE", "LIB", "LIBPATH",
+        "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsRedistDir",
+        "VSINSTALLDIR", "VisualStudioVersion",
+        "WindowsSdkDir", "WindowsSDKVersion", "WindowsSDKLibVersion",
+        "UniversalCRTSdkDir", "UCRTVersion",
+        "FrameworkDir", "FrameworkDir64", "FrameworkVersion", "FrameworkVersion64"
+    )
+
+    foreach ($line in ($stdout -split "`r?`n")) {
+        $separator = $line.IndexOf("=")
+        if ($separator -le 0) { continue }
+        $name = $line.Substring(0, $separator)
+        if ($allowed -notcontains $name) { continue }
+        [System.Environment]::SetEnvironmentVariable($name, $line.Substring($separator + 1), "Process")
+    }
+}
+
+function Initialize-TrellisNativeBuildEnvironment {
+    param([Parameter(Mandatory)][string]$RuntimeScripts)
+
+    $toolchain = Get-TrellisVs2022Toolchain
+    Import-TrellisVs2022Environment -Toolchain $toolchain
+
+    $cudaRoot = Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA\v13.4"
+    $cudaBin = Join-Path $cudaRoot "bin"
+    $nvcc = Join-Path $cudaBin "nvcc.exe"
+    if (-not (Test-Path -LiteralPath $nvcc -PathType Leaf)) {
+        throw "CUDA Toolkit 13.4 (nvcc.exe) est requis pour TRELLIS. Lancez '.\setup-asset-factory.ps1 trellis runtime-install'."
+    }
+
+    # Place les outils du venv, CUDA et MSVC en tete du PATH afin que les builds JIT
+    # de cumm/spconv retrouvent ninja, nvcc et cl.exe dans un nouveau terminal.
+    $prefixes = @((Split-Path -Parent $toolchain.ClPath), $cudaBin, $RuntimeScripts)
+    foreach ($entry in $prefixes) {
+        if ($env:Path -notlike "$entry;*") {
+            $env:Path = "$entry;$env:Path"
+        }
+    }
+
+    $env:CUDA_HOME = $cudaRoot
+    $env:CUDA_PATH = $cudaRoot
+    $env:CUDACXX = $nvcc
+    $env:CUDAHOSTCXX = $toolchain.ClPath
+    $env:CC = $toolchain.ClPath
+    $env:CXX = $toolchain.ClPath
+    $env:DISTUTILS_USE_SDK = "1"
+    $env:MSSdk = "1"
+    $env:TORCH_CUDA_ARCH_LIST = "12.0"
+    $env:CUMM_CUDA_ARCH_LIST = "12.0"
+    $env:MAX_JOBS = "1"
+
+    if ([string]::IsNullOrWhiteSpace($env:CL)) {
+        $env:CL = "/Zc:preprocessor"
+    } elseif ($env:CL -notmatch '(^|\s)/Zc:preprocessor($|\s)') {
+        $env:CL = "$env:CL /Zc:preprocessor"
+    }
+
+    $resolvedCl = Get-Command cl.exe -CommandType Application -ErrorAction SilentlyContinue
+    $resolvedNvcc = Get-Command nvcc.exe -CommandType Application -ErrorAction SilentlyContinue
+    $resolvedNinja = Get-Command ninja.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $resolvedCl) { throw "cl.exe reste introuvable apres l'initialisation de Visual Studio 2022." }
+    if ($null -eq $resolvedNvcc) { throw "nvcc.exe reste introuvable apres l'initialisation de CUDA 13.4." }
+    if ($null -eq $resolvedNinja) { throw "ninja.exe reste introuvable dans le runtime TRELLIS." }
+
+    Write-Host "[OK] Compilateur MSVC : $($resolvedCl.Path)"
+    Write-Host "[OK] Compilateur CUDA : $($resolvedNvcc.Path)"
+    Write-Host "[OK] Outil de build Ninja : $($resolvedNinja.Path)"
+}
 
 function Resolve-UnrealImportConfiguration {
     param([Parameter(Mandatory)][string]$ResolvedInput)
@@ -136,28 +322,53 @@ if (-not [string]::IsNullOrWhiteSpace($InputPath)) {
 if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Resolve-AssetFactoryPath -Path $OutputDir
 }
+if (-not [string]::IsNullOrWhiteSpace($GenerationRoot)) {
+    $GenerationRoot = Resolve-AssetFactoryPath -Path $GenerationRoot
+}
+if (-not [string]::IsNullOrWhiteSpace($OutputDir) -and -not [string]::IsNullOrWhiteSpace($GenerationRoot)) {
+    throw "Use either -GenerationRoot (recommended) or legacy -OutputDir, not both."
+}
+$OwnsGeneration = [string]::IsNullOrWhiteSpace($OutputDir) -and [string]::IsNullOrWhiteSpace($GenerationRoot)
 if ([string]::IsNullOrWhiteSpace($ModelsDir)) {
     $ModelsDir = Join-Path $AssetFactoryRoot "models\trellis"
 } else {
     $ModelsDir = Resolve-AssetFactoryPath -Path $ModelsDir
 }
 
-$oldNoUserSite = $env:PYTHONNOUSERSITE
-$oldSparseBackend = $env:SPARSE_ATTN_BACKEND
-$oldAttentionBackend = $env:ATTN_BACKEND
-$oldSpconvAlgo = $env:SPCONV_ALGO
+$nativeEnvironmentNames = @(
+    "Path", "INCLUDE", "LIB", "LIBPATH",
+    "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsRedistDir",
+    "VSINSTALLDIR", "VisualStudioVersion",
+    "WindowsSdkDir", "WindowsSDKVersion", "WindowsSDKLibVersion",
+    "UniversalCRTSdkDir", "UCRTVersion",
+    "FrameworkDir", "FrameworkDir64", "FrameworkVersion", "FrameworkVersion64",
+    "CUDA_HOME", "CUDA_PATH", "CUDACXX", "CUDAHOSTCXX",
+    "CC", "CXX", "DISTUTILS_USE_SDK", "MSSdk", "CL",
+    "TORCH_CUDA_ARCH_LIST", "CUMM_CUDA_ARCH_LIST", "MAX_JOBS",
+    "PYTHONNOUSERSITE", "SPARSE_ATTN_BACKEND", "ATTN_BACKEND", "SPCONV_ALGO"
+)
+$oldNativeEnvironment = @{}
+foreach ($name in $nativeEnvironmentNames) {
+    $oldNativeEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, "Process")
+}
 
+$TrellisScripts = Split-Path -Parent $TrellisPython
 $env:PYTHONNOUSERSITE = "1"
 $env:ATTN_BACKEND = "sdpa"
 $env:SPARSE_ATTN_BACKEND = "xformers"
 $env:SPCONV_ALGO = "native"
 
+$metadata = $null
+$metadataPath = $null
+$layout = $null
+$StandaloneGeneration = $null
+$StandaloneGenerationPath = $null
 $previousLocation = Get-Location
 try {
     Set-Location -LiteralPath $AssetFactoryRoot
 
     if ($SelfTest) {
-        Write-Host "[INFO] Testing Asset Factory TRELLIS SDPA compatibility layer..."
+        Write-Host "[INFO] Test de la couche de compatibilité SDPA TRELLIS..."
         $nativePreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
@@ -169,7 +380,7 @@ try {
         if ($exitCode -ne 0) {
             throw "TRELLIS SDPA compatibility self-test failed with exit code $exitCode."
         }
-        Write-Host "[OK] TRELLIS SDPA compatibility self-test passed."
+        Write-Host "[OK] Test de compatibilité SDPA TRELLIS réussi."
         return
     }
 
@@ -197,22 +408,102 @@ try {
         throw "Input image does not exist: $resolvedInput"
     }
 
-    $unrealConfig = Resolve-UnrealImportConfiguration -ResolvedInput $resolvedInput
+    $effectiveAssetId = $AssetId
+    if ([string]::IsNullOrWhiteSpace($effectiveAssetId)) {
+        $effectiveAssetId = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInput)
+    }
+    Assert-AFFileStem -Name $effectiveAssetId
 
+    $layout = $null
+    $metadataPath = $null
+    $metadata = $null
     if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-        $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-        $resolvedOutput = Join-Path $AssetFactoryRoot "outputs\trellis\$stamp"
+        $layout = Resolve-AFGenerationLayout `
+            -Root $AssetFactoryRoot `
+            -AssetId $effectiveAssetId `
+            -GenerationRoot $GenerationRoot `
+            -Version $AssetVersion
+        $resolvedOutput = $layout.RawDir
+        $extension = [System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant()
+        $storedInput = Join-Path $layout.SourceDir ($effectiveAssetId + $extension)
+        if ([System.IO.Path]::GetFullPath($resolvedInput) -ne [System.IO.Path]::GetFullPath($storedInput)) {
+            if (Test-Path -LiteralPath $storedInput) {
+                throw "Generation source image already exists; refusing to overwrite it: $storedInput"
+            }
+            Copy-Item -LiteralPath $resolvedInput -Destination $storedInput
+        }
+        $resolvedInput = $storedInput
+        $metadataPath = Join-Path $layout.MetadataDir "trellis.json"
+        $metadata = [ordered]@{
+            schemaVersion = 3
+            assetId = $effectiveAssetId
+            assetVersion = $layout.Version
+            generationRoot = $layout.Root
+            createdAt = (Get-Date).ToString("o")
+            completedAt = $null
+            status = "running"
+            inputPath = $resolvedInput
+            glbPath = $null
+            plyPath = $null
+            seed = $Seed
+            simplify = $Simplify
+            textureSize = $TextureSize
+            error = $null
+        }
+        Save-AFJson -Value $metadata -Path $metadataPath
+        if ($OwnsGeneration) {
+            $StandaloneGenerationPath = $layout.GenerationMetadataPath
+            $StandaloneGeneration = [ordered]@{
+                schemaVersion = 3
+                generationId = "$effectiveAssetId-$($layout.Version)"
+                assetId = $effectiveAssetId
+                assetVersion = $layout.Version
+                generationRoot = $layout.Root
+                type = "engine-only"
+                engine = "trellis"
+                createdAt = $metadata.createdAt
+                completedAt = $null
+                status = "running"
+                imagePath = $resolvedInput
+                rawModelPath = $null
+                metadataPath = $metadataPath
+                unreal = [ordered]@{ status = "pending"; assetVersion = $null; destinationPath = $null }
+                error = $null
+            }
+            Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+        }
     } else {
+        # Compatibilité avec les anciens appels explicites : -OutputDir désigne directement
+        # le dossier brut. Les nouveaux pipelines utilisent -GenerationRoot.
         $resolvedOutput = Resolve-AssetFactoryPath -Path $OutputDir
     }
 
     New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
+    $assetName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInput)
+    $expectedGlb = Join-Path $resolvedOutput ($assetName + ".glb")
+    if (Test-Path -LiteralPath $expectedGlb) {
+        throw "TRELLIS output already exists; refusing to overwrite it: $expectedGlb"
+    }
+    if ($SavePly) {
+        $expectedPly = Join-Path $resolvedOutput ($assetName + ".ply")
+        if (Test-Path -LiteralPath $expectedPly) {
+            throw "TRELLIS PLY output already exists; refusing to overwrite it: $expectedPly"
+        }
+    }
+    $unrealConfig = Resolve-UnrealImportConfiguration -ResolvedInput $resolvedInput
 
-    Write-Host "[INFO] Running TRELLIS through the Asset Factory SDPA adapter..."
-    Write-Host "[INFO] Input: $resolvedInput"
-    Write-Host "[INFO] Output: $resolvedOutput"
-    Write-Host "[INFO] Models: $ModelsDir (offline mode)"
-    Write-Host "[INFO] Automatic Unreal import: $($unrealConfig.autoImport)"
+    Write-Host "[INFO] Exécution de TRELLIS via l’adaptateur SDPA Asset Factory..."
+    Write-Host "[INFO] Entrée : $resolvedInput"
+    Write-Host "[INFO] Sortie : $resolvedOutput"
+    if ($null -ne $layout) { Write-Host "[INFO] Génération : $($layout.Root)" }
+    Write-Host "[INFO] Modèles : $ModelsDir (mode hors ligne)"
+    if (-not $PipelineManaged) {
+        if ($unrealConfig.autoImport) {
+            Write-Host "[INFO] Import Unreal direct : activé"
+        } elseif ($unrealConfig.enabled) {
+            Write-Host "[INFO] Import Unreal direct : désactivé"
+        }
+    }
 
     $arguments = @(
         "-B", "-s", "-u",
@@ -227,6 +518,9 @@ try {
     if ($SavePly) {
         $arguments += "--save-ply"
     }
+
+    Initialize-TrellisNativeBuildEnvironment -RuntimeScripts $TrellisScripts
+    Write-Host "[INFO] Backend natif cumm/spconv : réutilisation du cache si valide ; recompilation uniquement si le cache est absent ou invalidé."
 
     # Les pipelines externes capturent stderr. Sous Windows PowerShell 5.1, les avertissements Python
     # sans gravité ne doivent pas devenir des enregistrements NativeCommandError fatals.
@@ -243,8 +537,7 @@ try {
         throw "TRELLIS inference failed with exit code $exitCode."
     }
 
-    $assetName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInput)
-    $glb = Join-Path $resolvedOutput ($assetName + ".glb")
+    $glb = $expectedGlb
     if (-not (Test-Path -LiteralPath $glb -PathType Leaf)) {
         throw "TRELLIS returned success but the expected GLB was not produced: $glb"
     }
@@ -252,33 +545,96 @@ try {
         throw "TRELLIS produced an empty GLB: $glb"
     }
 
-    Write-Host "[OK] TRELLIS GLB generated: $glb"
+    if ($null -ne $metadata) {
+        $metadata.status = "completed"
+        $metadata.completedAt = (Get-Date).ToString("o")
+        $metadata.glbPath = $glb
+        if ($SavePly) {
+            $plyPath = Join-Path $resolvedOutput ($assetName + ".ply")
+            if (Test-Path -LiteralPath $plyPath -PathType Leaf) { $metadata.plyPath = $plyPath }
+        }
+        Save-AFJson -Value $metadata -Path $metadataPath
+    }
+    if ($null -ne $StandaloneGeneration) {
+        $StandaloneGeneration.rawModelPath = $glb
+        Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+    }
+
+    Write-Host "[OK] GLB TRELLIS généré : $glb"
+    if ($null -ne $layout) {
+        Write-Host "[OK] Génération : $($layout.Root)"
+        if (-not [string]::IsNullOrWhiteSpace($layout.Version)) { Write-Host "[OK] Version : $($layout.Version)" }
+        Write-Host "[OK] Métadonnées : $metadataPath"
+    }
 
     # Python s'est arrêté ; TRELLIS n'occupe donc plus la mémoire GPU au démarrage d'Unreal.
     if ($unrealConfig.autoImport) {
-        Write-Host "[INFO] Importing the generated GLB into Unreal..."
+        Write-Host "[INFO] Import du GLB généré dans Unreal Engine..."
         $global:LASTEXITCODE = 0
-        & $UnrealImportRunner `
-            -ProfilePath $unrealConfig.profilePath `
-            -SourcePath $glb `
-            -AssetId $unrealConfig.assetId `
-            -Category $unrealConfig.category
+        $importParameters = @{
+            ProfilePath = $unrealConfig.profilePath
+            SourcePath = $glb
+            AssetId = $unrealConfig.assetId
+            Category = $unrealConfig.category
+        }
+        if ($null -ne $layout -and -not [string]::IsNullOrWhiteSpace($layout.Version)) {
+            $importParameters.AssetVersion = $layout.Version
+            $importParameters.MetadataPath = (Join-Path $layout.MetadataDir "unreal.json")
+            $importParameters.LogPath = (Join-Path $layout.LogsDir "unreal.log")
+        }
+        & $UnrealImportRunner @importParameters
         $importExitCode = $LASTEXITCODE
 
         if ($importExitCode -ne 0) {
             throw "Unreal import failed. The generated GLB is preserved: $glb. Retry with tools\import-unreal.ps1; no generation is needed."
         }
-        Write-Host "[OK] Automatic Unreal import completed."
+        if ($null -ne $StandaloneGeneration) {
+            $StandaloneGeneration.unreal.status = "completed"
+            $unrealMetadataPath = Join-Path $layout.MetadataDir "unreal.json"
+            if (Test-Path -LiteralPath $unrealMetadataPath -PathType Leaf) {
+                $unrealMetadata = Get-Content -LiteralPath $unrealMetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $StandaloneGeneration.unreal.assetVersion = $unrealMetadata.assetVersion
+                $StandaloneGeneration.unreal.destinationPath = $unrealMetadata.destinationPath
+            }
+        }
+        Write-Host "[OK] Import Unreal automatique terminé."
     } elseif ($unrealConfig.enabled) {
-        Write-Host "[INFO] Automatic Unreal import disabled by profile/argument. GLB kept for manual import."
+        if (-not $PipelineManaged) {
+            Write-Host "[INFO] Import Unreal automatique désactivé. Le GLB est conservé pour un import manuel."
+        }
     } else {
-        Write-Host "[INFO] No Unreal profile selected. Use -ProjectProfile to enable the existing import workflow."
+        if (-not $PipelineManaged) {
+            Write-Host "[INFO] Aucun profil Unreal sélectionné. Utilisez -ProjectProfile pour activer l’import."
+        }
+        if ($null -ne $StandaloneGeneration) { $StandaloneGeneration.unreal.status = "not-configured" }
     }
+
+    if ($null -ne $StandaloneGeneration) {
+        if ($StandaloneGeneration.unreal.status -eq "pending") { $StandaloneGeneration.unreal.status = "skipped" }
+        $StandaloneGeneration.status = "completed"
+        $StandaloneGeneration.completedAt = (Get-Date).ToString("o")
+        Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+        Write-Host "[OK] Métadonnées de génération : $StandaloneGenerationPath"
+    }
+} catch {
+    if ($null -ne $metadata -and $null -ne $metadataPath) {
+        $metadata.status = "failed"
+        $metadata.completedAt = (Get-Date).ToString("o")
+        $metadata.error = $_.Exception.Message
+        try { Save-AFJson -Value $metadata -Path $metadataPath } catch { }
+    }
+    if ($null -ne $StandaloneGeneration -and $null -ne $StandaloneGenerationPath) {
+        $StandaloneGeneration.status = "failed"
+        $StandaloneGeneration.completedAt = (Get-Date).ToString("o")
+        $StandaloneGeneration.error = $_.Exception.Message
+        if ($StandaloneGeneration.unreal.status -eq "pending") { $StandaloneGeneration.unreal.status = "failed" }
+        try { Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath } catch { }
+    }
+    throw
 } finally {
     Set-Location -LiteralPath $previousLocation
 
-    if ($null -eq $oldNoUserSite) { Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue } else { $env:PYTHONNOUSERSITE = $oldNoUserSite }
-    if ($null -eq $oldSparseBackend) { Remove-Item Env:\SPARSE_ATTN_BACKEND -ErrorAction SilentlyContinue } else { $env:SPARSE_ATTN_BACKEND = $oldSparseBackend }
-    if ($null -eq $oldAttentionBackend) { Remove-Item Env:\ATTN_BACKEND -ErrorAction SilentlyContinue } else { $env:ATTN_BACKEND = $oldAttentionBackend }
-    if ($null -eq $oldSpconvAlgo) { Remove-Item Env:\SPCONV_ALGO -ErrorAction SilentlyContinue } else { $env:SPCONV_ALGO = $oldSpconvAlgo }
+    foreach ($name in $nativeEnvironmentNames) {
+        [System.Environment]::SetEnvironmentVariable($name, $oldNativeEnvironment[$name], "Process")
+    }
 }

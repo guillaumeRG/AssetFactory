@@ -93,15 +93,14 @@
   },
   "7": {
     "inputs": {
-      "filename_prefix": "assetfactory_base",
       "images": [
         "6",
         0
       ]
     },
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "_meta": {
-      "title": "Enregistrer Image"
+      "title": "Prévisualiser l'image"
     }
   }
 }

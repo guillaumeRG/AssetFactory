@@ -1,206 +1,192 @@
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$InputPath
+    [ValidateNotNullOrEmpty()]
+    [string]$InputPath,
+
+    [string]$AssetId = "",
+    [string]$GenerationRoot = "",
+    [string]$AssetVersion = ""
 )
 
-# Racine d'AssetFactory = parent de tools\
-$AssetFactoryRoot = Split-Path -Parent $PSScriptRoot
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-# ---------------------------------------------------------------------------
-# Résolution du chemin d'entrée
-# ---------------------------------------------------------------------------
+$AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot "pipeline-common.ps1")
 
-if (Test-Path -LiteralPath $InputPath) {
-    $AbsInputPath = (Resolve-Path -LiteralPath $InputPath).Path
-}
-else {
-    $CandidateInputPath = Join-Path -Path $AssetFactoryRoot -ChildPath $InputPath
+$TripoSREngineDir = Join-Path $AssetFactoryRoot "engines\triposr"
+$PythonPath = Join-Path $TripoSREngineDir ".venv\Scripts\python.exe"
+$RunScriptPath = Join-Path $TripoSREngineDir "run.py"
 
-    if (-not (Test-Path -LiteralPath $CandidateInputPath)) {
-        Write-Output "[FAIL] Input file not found: $InputPath"
-        exit 1
-    }
+function Write-Info { param([string]$Message) Write-Host "[INFO] $Message" }
+function Write-Ok { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
+function Write-Fail { param([string]$Message) Write-Host "[FAIL] $Message" -ForegroundColor Red }
 
-    $AbsInputPath = (Resolve-Path -LiteralPath $CandidateInputPath).Path
-}
-
-# ---------------------------------------------------------------------------
-# Validation de l'installation TripoSR
-# ---------------------------------------------------------------------------
-
-$TripoSREngineDir = Join-Path -Path $AssetFactoryRoot -ChildPath "engines\triposr"
-$PythonPath = Join-Path -Path $TripoSREngineDir -ChildPath ".venv\Scripts\python.exe"
-$RunScriptPath = Join-Path -Path $TripoSREngineDir -ChildPath "run.py"
-
-if (-not (Test-Path -LiteralPath $PythonPath)) {
-    Write-Output "[FAIL] Python executable not found: $PythonPath"
-    exit 1
-}
-
-if (-not (Test-Path -LiteralPath $RunScriptPath)) {
-    Write-Output "[FAIL] TripoSR run script not found: $RunScriptPath"
-    exit 1
-}
-
-# ---------------------------------------------------------------------------
-# Création du job Asset Factory
-# ---------------------------------------------------------------------------
-
-$JobId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-
-$JobsRoot = Join-Path -Path $AssetFactoryRoot -ChildPath "outputs\jobs"
-$JobDirectory = Join-Path -Path $JobsRoot -ChildPath $JobId
-
-$InputDir = Join-Path -Path $JobDirectory -ChildPath "input"
-$GeneratedDir = Join-Path -Path $JobDirectory -ChildPath "generated"
-$MeshDir = Join-Path -Path $JobDirectory -ChildPath "mesh"
-$LogsDir = Join-Path -Path $JobDirectory -ChildPath "logs"
-
-New-Item -ItemType Directory -Force -Path $InputDir | Out-Null
-New-Item -ItemType Directory -Force -Path $GeneratedDir | Out-Null
-New-Item -ItemType Directory -Force -Path $MeshDir | Out-Null
-New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
-
-# Copie de l'image source dans le job
-$InputFileName = Split-Path -Path $AbsInputPath -Leaf
-$JobInputPath = Join-Path -Path $InputDir -ChildPath $InputFileName
-
-Copy-Item -LiteralPath $AbsInputPath -Destination $JobInputPath -Force
-
-$JobInputPath = (Resolve-Path -LiteralPath $JobInputPath).Path
-
-# Les sorties temporaires/générées de TripoSR restent dans le job
-$TripoSROutputDir = Join-Path -Path $GeneratedDir -ChildPath "triposr"
-
-New-Item -ItemType Directory -Force -Path $TripoSROutputDir | Out-Null
-
-$FinalMeshPath = Join-Path -Path $MeshDir -ChildPath "mesh.obj"
-$JobJsonPath = Join-Path -Path $JobDirectory -ChildPath "job.json"
-
-$CreatedAt = (Get-Date).ToString("o")
-$StartedAt = (Get-Date).ToString("o")
-
-$JobData = [ordered]@{
-    jobId = $JobId
-    createdAt = $CreatedAt
-    status = "running"
-
-    input = [ordered]@{
-        sourcePath = $AbsInputPath
-        storedPath = $JobInputPath
-    }
-
-    steps = [ordered]@{
-        triposr = [ordered]@{
-            status = "running"
-            startedAt = $StartedAt
-            completedAt = $null
-            meshPath = $null
-            error = $null
-        }
-    }
-}
-
-$JobData |
-    ConvertTo-Json -Depth 6 |
-    Set-Content -LiteralPath $JobJsonPath -Encoding UTF8
-
-# ---------------------------------------------------------------------------
-# Exécution de TripoSR
-# ---------------------------------------------------------------------------
-
-$OriginalLocation = Get-Location
+$Metadata = $null
+$MetadataPath = $null
+$TempOutputDir = $null
 $ExitCode = 1
 $FailureMessage = $null
+$Layout = $null
+$OwnsGeneration = [string]::IsNullOrWhiteSpace($GenerationRoot)
+$StandaloneGeneration = $null
+$StandaloneGenerationPath = $null
 
 try {
-    Set-Location -LiteralPath $TripoSREngineDir
+    $ResolvedInput = Resolve-AFPath -Path $InputPath -BasePath (Get-Location).Path
+    Assert-AFFile -Path $ResolvedInput -Label "Input image"
 
-    & $PythonPath $RunScriptPath $JobInputPath --output-dir $TripoSROutputDir
-
-    # Capture immédiatement après l'exécution de Python
-    $ExitCode = $LASTEXITCODE
-
-    if ($ExitCode -ne 0) {
-        $FailureMessage = "TripoSR failed with exit code: $ExitCode"
+    if ([string]::IsNullOrWhiteSpace($AssetId)) {
+        $AssetId = [System.IO.Path]::GetFileNameWithoutExtension($ResolvedInput)
     }
-    else {
-        $GeneratedMeshPath = Join-Path -Path $TripoSROutputDir -ChildPath "0\mesh.obj"
+    Assert-AFFileStem -Name $AssetId
 
-        if (-not (Test-Path -LiteralPath $GeneratedMeshPath)) {
-            $ExitCode = 1
-            $FailureMessage = "TripoSR completed but mesh was not found: $GeneratedMeshPath"
-        }
-        else {
-            Copy-Item -LiteralPath $GeneratedMeshPath -Destination $FinalMeshPath -Force
+    Assert-AFFile -Path $PythonPath -Label "TripoSR Python executable"
+    Assert-AFFile -Path $RunScriptPath -Label "TripoSR run script"
 
-            if (-not (Test-Path -LiteralPath $FinalMeshPath)) {
-                $ExitCode = 1
-                $FailureMessage = "Final mesh could not be created: $FinalMeshPath"
+    $Layout = Resolve-AFGenerationLayout `
+        -Root $AssetFactoryRoot `
+        -AssetId $AssetId `
+        -GenerationRoot $GenerationRoot `
+        -Version $AssetVersion
+
+    $extension = [System.IO.Path]::GetExtension($ResolvedInput).ToLowerInvariant()
+    if ($extension -notin @(".png", ".jpg", ".jpeg", ".webp")) {
+        throw "InputPath must be a PNG, JPEG or WebP image."
+    }
+
+    $StoredInput = Join-Path $Layout.SourceDir ($AssetId + $extension)
+    if ([System.IO.Path]::GetFullPath($ResolvedInput) -ne [System.IO.Path]::GetFullPath($StoredInput)) {
+        if (Test-Path -LiteralPath $StoredInput) {
+            $existing = Get-Item -LiteralPath $StoredInput
+            $source = Get-Item -LiteralPath $ResolvedInput
+            if ($existing.Length -ne $source.Length) {
+                throw "Generation source image already exists with different content: $StoredInput"
             }
-            else {
-                $FinalMeshPath = (Resolve-Path -LiteralPath $FinalMeshPath).Path
-                $ExitCode = 0
-            }
+        } else {
+            Copy-Item -LiteralPath $ResolvedInput -Destination $StoredInput
         }
     }
+    Assert-AFFile -Path $StoredInput -Label "Stored input image"
+
+    $RawMeshPath = Join-Path $Layout.RawDir ($AssetId + ".obj")
+    if (Test-Path -LiteralPath $RawMeshPath) {
+        throw "Raw TripoSR mesh already exists; refusing to overwrite it: $RawMeshPath"
+    }
+
+    $MetadataPath = Join-Path $Layout.MetadataDir "triposr.json"
+    $JobId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $Metadata = [ordered]@{
+        schemaVersion = 3
+        jobId = $JobId
+        assetId = $AssetId
+        assetVersion = $Layout.Version
+        generationRoot = $Layout.Root
+        createdAt = (Get-Date).ToString("o")
+        completedAt = $null
+        status = "running"
+        sourcePath = $ResolvedInput
+        storedInputPath = $StoredInput
+        meshPath = $null
+        error = $null
+    }
+    Save-AFJson -Value $Metadata -Path $MetadataPath
+    if ($OwnsGeneration) {
+        $StandaloneGenerationPath = $Layout.GenerationMetadataPath
+        $StandaloneGeneration = [ordered]@{
+            schemaVersion = 3
+            generationId = "$AssetId-$($Layout.Version)"
+            assetId = $AssetId
+            assetVersion = $Layout.Version
+            generationRoot = $Layout.Root
+            type = "engine-only"
+            engine = "triposr"
+            createdAt = $Metadata.createdAt
+            completedAt = $null
+            status = "running"
+            imagePath = $StoredInput
+            rawModelPath = $null
+            metadataPath = $MetadataPath
+            error = $null
+        }
+        Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+    }
+
+    $TempOutputDir = Join-Path ([System.IO.Path]::GetTempPath()) ("assetfactory-triposr-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $TempOutputDir | Out-Null
+
+    Write-Info "AssetId: $AssetId"
+    Write-Info "Generation: $($Layout.Root)"
+    Write-Info "Input: $StoredInput"
+    Write-Info "Raw output: $RawMeshPath"
+
+    $OriginalLocation = Get-Location
+    try {
+        Set-Location -LiteralPath $TripoSREngineDir
+        $oldPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & $PythonPath $RunScriptPath $StoredInput --output-dir $TempOutputDir
+            $nativeExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $oldPreference
+        }
+    } finally {
+        Set-Location -LiteralPath $OriginalLocation
+    }
+
+    if ($nativeExitCode -ne 0) {
+        throw "TripoSR failed with exit code: $nativeExitCode"
+    }
+
+    $GeneratedMeshPath = Join-Path $TempOutputDir "0\mesh.obj"
+    Assert-AFFile -Path $GeneratedMeshPath -Label "TripoSR generated mesh"
+    Copy-Item -LiteralPath $GeneratedMeshPath -Destination $RawMeshPath
+    Assert-AFFile -Path $RawMeshPath -Label "Raw TripoSR mesh"
+
+    $Metadata.status = "completed"
+    $Metadata.completedAt = (Get-Date).ToString("o")
+    $Metadata.meshPath = $RawMeshPath
+    Save-AFJson -Value $Metadata -Path $MetadataPath
+    if ($null -ne $StandaloneGeneration) {
+        $StandaloneGeneration.status = "completed"
+        $StandaloneGeneration.completedAt = $Metadata.completedAt
+        $StandaloneGeneration.rawModelPath = $RawMeshPath
+        Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+    }
+    $ExitCode = 0
 }
 catch {
-    $ExitCode = 1
     $FailureMessage = $_.Exception.Message
+    if ($null -ne $Metadata -and $null -ne $MetadataPath) {
+        $Metadata.status = "failed"
+        $Metadata.completedAt = (Get-Date).ToString("o")
+        $Metadata.error = $FailureMessage
+        try { Save-AFJson -Value $Metadata -Path $MetadataPath } catch { }
+    }
+    if ($null -ne $StandaloneGeneration -and $null -ne $StandaloneGenerationPath) {
+        $StandaloneGeneration.status = "failed"
+        $StandaloneGeneration.completedAt = (Get-Date).ToString("o")
+        $StandaloneGeneration.error = $FailureMessage
+        try { Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath } catch { }
+    }
+    Write-Fail $FailureMessage
+    $ExitCode = 1
 }
 finally {
-    Set-Location -LiteralPath $OriginalLocation
+    if ($TempOutputDir -and (Test-Path -LiteralPath $TempOutputDir -PathType Container)) {
+        Remove-Item -LiteralPath $TempOutputDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
-
-# ---------------------------------------------------------------------------
-# Finalisation des métadonnées du job
-# ---------------------------------------------------------------------------
-
-$CompletedAt = (Get-Date).ToString("o")
 
 if ($ExitCode -eq 0) {
-    $JobData.status = "success"
-
-    $JobData.steps.triposr.status = "success"
-    $JobData.steps.triposr.completedAt = $CompletedAt
-    $JobData.steps.triposr.meshPath = $FinalMeshPath
-    $JobData.steps.triposr.error = $null
+    Write-Ok "TripoSR generation completed"
+    Write-Ok "Job: $JobId"
+    Write-Ok "Generation: $($Layout.Root)"
+    if (-not [string]::IsNullOrWhiteSpace($Layout.Version)) { Write-Ok "Version: $($Layout.Version)" }
+    Write-Ok "Mesh: $RawMeshPath"
+    Write-Ok "Metadata: $MetadataPath"
+    if ($null -ne $StandaloneGenerationPath) { Write-Ok "Generation metadata: $StandaloneGenerationPath" }
 }
-else {
-    if ([string]::IsNullOrWhiteSpace($FailureMessage)) {
-        $FailureMessage = "Unknown TripoSR failure."
-    }
-
-    $JobData.status = "failed"
-
-    $JobData.steps.triposr.status = "failed"
-    $JobData.steps.triposr.completedAt = $CompletedAt
-    $JobData.steps.triposr.meshPath = $null
-    $JobData.steps.triposr.error = $FailureMessage
-}
-
-$JobData |
-    ConvertTo-Json -Depth 6 |
-    Set-Content -LiteralPath $JobJsonPath -Encoding UTF8
-
-$JobJsonPath = (Resolve-Path -LiteralPath $JobJsonPath).Path
-
-# ---------------------------------------------------------------------------
-# Résultat
-# ---------------------------------------------------------------------------
-
-if ($ExitCode -ne 0) {
-    Write-Output "[FAIL] Asset Factory job failed"
-    Write-Output "[FAIL] Job: $JobId"
-    Write-Output "[FAIL] Error: $FailureMessage"
-    Write-Output "[FAIL] Metadata: $JobJsonPath"
-    exit $ExitCode
-}
-
-Write-Output "[OK] Asset Factory job completed"
-Write-Output "[OK] Job: $JobId"
-Write-Output "[OK] Mesh: $FinalMeshPath"
-Write-Output "[OK] Metadata: $JobJsonPath"
-
-exit 0
+exit $ExitCode

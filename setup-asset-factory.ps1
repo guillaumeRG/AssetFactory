@@ -22,11 +22,15 @@ $Script:HadWarnings = $false
 $Script:TrellisVsEnvironmentLoaded = $false
 
 $RequiredDirs = @(
-    "orchestrator",
     "engines",
     "blender\scripts",
-    "jobs",
     "outputs",
+    "outputs\assets",
+    "outputs\batches",
+    "outputs\imports",
+    "outputs\tests",
+    "outputs\diagnostics",
+    "outputs\.locks",
     "tools",
     "workflows",
     "batches",
@@ -660,12 +664,12 @@ function Ensure-Readme {
     $content = @"
 # Asset Factory
 
-Local, modular asset-production tooling for game, prototype and visualization projects.
+Chaîne locale, modulaire et reproductible de génération et de préparation d'assets.
 
-The project is intentionally developed incrementally. AI engines are isolated,
-replaceable and validated independently before integration into the production pipeline.
+Les moteurs IA sont isolés, remplaçables et validés indépendamment avant leur
+intégration dans le pipeline de production.
 
-See `docs/PROJECT_OVERVIEW.md`, `docs/ARCHITECTURE.md` and `docs/QA_POLICY.md`.
+Voir `docs/PROJECT_OVERVIEW.md`, `docs/ARCHITECTURE.md` et `docs/QA_POLICY.md`.
 "@
     Set-Content -LiteralPath $readmePath -Value $content -Encoding UTF8
     Write-Result "OK" "Created README.md"
@@ -1369,10 +1373,10 @@ function Invoke-TripoSrSmokeTest {
 
     Test-TripoSrImports
 
-    # Utilise toujours un répertoire de sortie unique. Réutiliser outputs\triposr-smoke pourrait
-    # permettre à un ancien maillage de faire passer à tort une inférence défaillante pour un succès.
+    # Utilise toujours un répertoire de test unique afin qu'un ancien maillage ne puisse
+    # pas faire passer à tort une inférence défaillante pour un succès.
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-    $outputDir = Join-Path $ProjectRoot "outputs\triposr-smoke\$stamp"
+    $outputDir = Join-Path $ProjectRoot "outputs\tests\triposr\$stamp"
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
     $runPy = Join-Path $TripoSrRoot "run.py"
@@ -2218,7 +2222,7 @@ function Invoke-TrellisNativeCompileTest {
 
     $toolchain = Assert-TrellisNativeToolchain
 
-    $testDir = Join-Path $ProjectRoot "outputs\trellis-native-toolchain"
+    $testDir = Join-Path $ProjectRoot "outputs\diagnostics\trellis\native-toolchain"
     if (-not (Test-Path -LiteralPath $testDir -PathType Container)) {
         New-Item -ItemType Directory -Path $testDir -Force | Out-Null
     }
@@ -2286,7 +2290,7 @@ function Import-TrellisVs2022BuildEnvironment {
 
     $originalPath = $env:Path
 
-    $tempDir = Join-Path $ProjectRoot "outputs\trellis-native-toolchain"
+    $tempDir = Join-Path $ProjectRoot "outputs\diagnostics\trellis\native-toolchain"
     if (-not (Test-Path -LiteralPath $tempDir -PathType Container)) {
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
     }
@@ -2454,15 +2458,20 @@ function Set-TrellisNativeBuildEnvironment {
     Import-TrellisVs2022BuildEnvironment -Toolchain $toolchain
 
     $cudaBin = Join-Path $toolchain.CudaRoot "bin"
+    $runtimeScripts = Split-Path -Parent $TrellisRuntimeVenvPython
     $env:CUDA_HOME = $toolchain.CudaRoot
     $env:CUDA_PATH = $toolchain.CudaRoot
     $env:CUDACXX = $toolchain.NvccPath
 
-    $pathEntries = @($cudaBin, (Split-Path -Parent $toolchain.ClPath))
-    foreach ($entry in $pathEntries) {
-        if ($env:Path -notlike "*$entry*") {
-            $env:Path = "$entry;$env:Path"
-        }
+    # Utilise exactement le même ninja.exe pendant l'installation native et pendant
+    # les générations. Mélanger un Ninja système avec celui du venv peut invalider
+    # .ninja_log et provoquer une recompilation JIT complète au lancement suivant.
+    $clBin = Split-Path -Parent $toolchain.ClPath
+    $env:Path = "$runtimeScripts;$cudaBin;$clBin;$env:Path"
+
+    $runtimeNinja = Join-Path $runtimeScripts "ninja.exe"
+    if (-not (Test-Path -LiteralPath $runtimeNinja -PathType Leaf)) {
+        throw "ninja.exe est absent du runtime TRELLIS : $runtimeNinja. Relancez 'trellis runtime-install'."
     }
 
     # Les RTX 50 Blackwell utilisent la capacité de calcul 12.0.
@@ -2488,6 +2497,7 @@ function Set-TrellisNativeBuildEnvironment {
     }
 
     Write-Result "OK" "TRELLIS native build environment configured for CUDA 13.4 / sm_120"
+    Write-Result "OK" "Ninja TRELLIS pinned to runtime venv: $runtimeNinja"
     Write-Result "OK" "MSVC standards-conforming preprocessor enabled (/Zc:preprocessor)"
 }
 
@@ -2607,7 +2617,7 @@ function Invoke-TrellisPipInstallPath {
     Write-Result "INFO" "Installing $DisplayName..."
     $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments $args
     if ($install.ExitCode -ne 0) {
-        $logDir = Join-Path $ProjectRoot "outputs\trellis-native-build"
+        $logDir = Join-Path $ProjectRoot "outputs\diagnostics\trellis\native-build"
         if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
@@ -2959,7 +2969,7 @@ function Patch-TrellisSpconvCompatibility {
 
     # MSVC ne peut pas ouvrir certains en-têtes générés dont les chemins dépassent 260 caractères.
     # Utilise l'option build_dir de pccm ; conserve le module résultant dans core_cc.
-    $buildRoot = Join-Path $ProjectRoot "outputs\spconv-build"
+    $buildRoot = Join-Path $ProjectRoot "outputs\diagnostics\spconv\build"
     $code = @'
 from pathlib import Path
 import ast
@@ -4679,14 +4689,14 @@ function Invoke-ComfyUiSmokeTest {
     $baseUrl = "http://$($ComfyUiSmokeHost):$smokePort"
     $healthUrl = "$baseUrl/system_stats"
 
-    $logDir = Join-Path $ProjectRoot "outputs\comfyui-smoke"
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $logDir = Join-Path $ProjectRoot "outputs\tests\comfyui\$stamp"
     if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
 
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-    $stdoutPath = Join-Path $logDir "comfyui-$stamp.stdout.log"
-    $stderrPath = Join-Path $logDir "comfyui-$stamp.stderr.log"
+    $stdoutPath = Join-Path $logDir "stdout.log"
+    $stderrPath = Join-Path $logDir "stderr.log"
 
     $process = $null
     try {

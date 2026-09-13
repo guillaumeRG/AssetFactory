@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
@@ -19,7 +19,12 @@ param(
     [int]$TimeoutSeconds = 300,
 
     [ValidateRange(1, 30)]
-    [int]$PollIntervalSeconds = 2
+    [int]$PollIntervalSeconds = 2,
+
+    [string]$AssetId = "",
+    [string]$GenerationRoot = "",
+    [string]$AssetVersion = "",
+    [switch]$PipelineManaged
 )
 
 Set-StrictMode -Version Latest
@@ -32,14 +37,16 @@ $ErrorActionPreference = "Stop"
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath(
     (Split-Path -Parent $PSScriptRoot)
 )
+. (Join-Path $PSScriptRoot "pipeline-common.ps1")
 
 $ServerUrl = $ServerUrl.TrimEnd("/")
+$OwnsGeneration = [string]::IsNullOrWhiteSpace($GenerationRoot)
 
 # Nœuds attendus dans le workflow API ComfyUI de référence.
 $PositivePromptNodeId = "2"
 $NegativePromptNodeId = "3"
 $SamplerNodeId = "5"
-$SaveImageNodeId = "7"
+$ImageOutputNodeId = "7"
 
 # -----------------------------------------------------------------------------
 # Fonctions utilitaires
@@ -85,7 +92,7 @@ function Set-JobFailed {
     try {
         Save-JobMetadata -Metadata $Metadata -Path $MetadataPath
     } catch {
-        Write-Fail "Could not persist failed job metadata: $($_.Exception.Message)"
+        Write-Fail "Impossible d’enregistrer les métadonnées d’échec : $($_.Exception.Message)"
     }
 }
 
@@ -115,23 +122,6 @@ function Assert-WorkflowNode {
     }
 }
 
-function New-UniqueJobId {
-    param([Parameter(Mandatory = $true)][string]$JobsRoot)
-
-    for ($attempt = 0; $attempt -lt 10; $attempt++) {
-        $candidate = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-        $candidatePath = Join-Path $JobsRoot $candidate
-
-        if (-not (Test-Path -LiteralPath $candidatePath)) {
-            return $candidate
-        }
-
-        Start-Sleep -Milliseconds 2
-    }
-
-    return "$(Get-Date -Format 'yyyyMMdd-HHmmss-fff')-$([guid]::NewGuid().ToString('N').Substring(0,8))"
-}
-
 function Get-ComfyUiErrorMessage {
     param([Parameter(Mandatory = $true)]$HistoryEntry)
 
@@ -156,9 +146,16 @@ function Get-ComfyUiErrorMessage {
 # Informations de démarrage
 # -----------------------------------------------------------------------------
 
-Write-Info "AssetFactory root: $AssetFactoryRoot"
-Write-Info "Prompt: $Prompt"
-Write-Info "Seed: $Seed"
+if (-not $PipelineManaged) {
+    Write-Info "Racine Asset Factory : $AssetFactoryRoot"
+    Write-Info "Prompt : $Prompt"
+    if ([string]::IsNullOrWhiteSpace($NegativePrompt)) {
+        Write-Info "Prompt négatif : (vide)"
+    } else {
+        Write-Info "Prompt négatif : $NegativePrompt"
+    }
+    Write-Info "Graine : $Seed"
+}
 
 # -----------------------------------------------------------------------------
 # Résolution et validation du workflow
@@ -173,17 +170,17 @@ try {
         )
     }
 } catch {
-    Write-Fail "Invalid workflow path: $WorkflowPath"
+    Write-Fail "Chemin de workflow invalide : $WorkflowPath"
     Write-Info $_.Exception.Message
     exit 1
 }
 
 if (-not (Test-Path -LiteralPath $ResolvedWorkflowPath -PathType Leaf)) {
-    Write-Fail "Workflow not found: $ResolvedWorkflowPath"
+    Write-Fail "Workflow introuvable : $ResolvedWorkflowPath"
     exit 1
 }
 
-Write-Ok "Workflow found: $ResolvedWorkflowPath"
+Write-Ok "Workflow trouvé : $ResolvedWorkflowPath"
 
 # -----------------------------------------------------------------------------
 # Validation de l'API ComfyUI
@@ -197,9 +194,9 @@ try {
         -Method Get `
         -TimeoutSec 5 | Out-Null
 
-    Write-Ok "ComfyUI API available: $SystemStatsUrl"
+    Write-Ok "API ComfyUI disponible : $SystemStatsUrl"
 } catch {
-    Write-Fail "ComfyUI API unavailable: $SystemStatsUrl"
+    Write-Fail "API ComfyUI indisponible : $SystemStatsUrl"
     Write-Info $_.Exception.Message
     exit 1
 }
@@ -212,7 +209,7 @@ try {
     $WorkflowJson = Get-Content -LiteralPath $ResolvedWorkflowPath -Raw
     $Workflow = $WorkflowJson | ConvertFrom-Json
 } catch {
-    Write-Fail "Could not load workflow JSON: $ResolvedWorkflowPath"
+    Write-Fail "Impossible de charger le workflow JSON : $ResolvedWorkflowPath"
     Write-Info $_.Exception.Message
     exit 1
 }
@@ -221,42 +218,56 @@ try {
     Assert-WorkflowNode -Workflow $Workflow -NodeId $PositivePromptNodeId -ExpectedClassType "CLIPTextEncode"
     Assert-WorkflowNode -Workflow $Workflow -NodeId $NegativePromptNodeId -ExpectedClassType "CLIPTextEncode"
     Assert-WorkflowNode -Workflow $Workflow -NodeId $SamplerNodeId -ExpectedClassType "KSampler"
-    Assert-WorkflowNode -Workflow $Workflow -NodeId $SaveImageNodeId -ExpectedClassType "SaveImage"
+    if (-not ($Workflow.PSObject.Properties.Name -contains $ImageOutputNodeId)) {
+        throw "Required image output node '$ImageOutputNodeId' is missing."
+    }
+    $OutputNodeClass = [string]$Workflow.$ImageOutputNodeId.class_type
+    if ($OutputNodeClass -notin @("PreviewImage", "SaveImage")) {
+        throw "Image output node '$ImageOutputNodeId' must be PreviewImage or SaveImage, got '$OutputNodeClass'."
+    }
 } catch {
     Write-Fail $_.Exception.Message
     exit 1
 }
 
 # -----------------------------------------------------------------------------
-# Création de l'identité du job et personnalisation du workflow
+# Création de l'identité de génération et personnalisation du workflow
 # -----------------------------------------------------------------------------
 
-$JobsRoot = Join-Path $AssetFactoryRoot "outputs\jobs"
-
-if (-not (Test-Path -LiteralPath $JobsRoot -PathType Container)) {
-    New-Item -ItemType Directory -Path $JobsRoot -Force | Out-Null
+if ([string]::IsNullOrWhiteSpace($AssetId)) {
+    $AssetId = "Image_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 }
+Assert-AFFileStem -Name $AssetId
 
-$JobId = New-UniqueJobId -JobsRoot $JobsRoot
+$Layout = Resolve-AFGenerationLayout `
+    -Root $AssetFactoryRoot `
+    -AssetId $AssetId `
+    -GenerationRoot $GenerationRoot `
+    -Version $AssetVersion
 
+$JobId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
 $Workflow.$PositivePromptNodeId.inputs.text = $Prompt
 $Workflow.$NegativePromptNodeId.inputs.text = $NegativePrompt
 $Workflow.$SamplerNodeId.inputs.seed = $Seed
-$Workflow.$SaveImageNodeId.inputs.filename_prefix = "assetfactory_$JobId"
+if ($Workflow.$ImageOutputNodeId.inputs.PSObject.Properties.Name -contains "filename_prefix") {
+    $Workflow.$ImageOutputNodeId.inputs.filename_prefix = "assetfactory_$JobId"
+}
 
-Write-Ok "Workflow loaded and customized"
-Write-Info "JobId: $JobId"
+Write-Ok "Workflow chargé et personnalisé"
+Write-Info "AssetId : $AssetId"
+Write-Info "Génération : $($Layout.Root)"
+Write-Info "JobId : $JobId"
 
 # -----------------------------------------------------------------------------
-# Création des répertoires du job et des métadonnées initiales
+# Métadonnées de l'étape ComfyUI
 # -----------------------------------------------------------------------------
 
-$JobRoot = Join-Path $JobsRoot $JobId
-$JobWorkflowDir = Join-Path $JobRoot "workflow"
-$JobGeneratedDir = Join-Path $JobRoot "generated"
-$JobLogsDir = Join-Path $JobRoot "logs"
-$ResolvedWorkflowOutput = Join-Path $JobWorkflowDir "workflow.json"
-$JobMetadataPath = Join-Path $JobRoot "job.json"
+$JobRoot = $Layout.Root
+$JobWorkflowDir = $Layout.MetadataDir
+$JobGeneratedDir = $Layout.SourceDir
+$JobLogsDir = $Layout.LogsDir
+$ResolvedWorkflowOutput = Join-Path $JobWorkflowDir "comfyui-workflow.json"
+$JobMetadataPath = Join-Path $Layout.MetadataDir "comfyui.json"
 
 try {
     foreach ($directory in @($JobRoot, $JobWorkflowDir, $JobGeneratedDir, $JobLogsDir)) {
@@ -267,38 +278,65 @@ try {
         ConvertTo-Json -Depth 100 |
         Set-Content -LiteralPath $ResolvedWorkflowOutput -Encoding UTF8
 } catch {
-    Write-Fail "Could not initialize job directories/workflow."
+    Write-Fail "Impossible d’initialiser les dossiers de génération ou le workflow."
     Write-Info $_.Exception.Message
     exit 1
 }
 
 $JobMetadata = [ordered]@{
-    jobId          = $JobId
-    createdAt      = (Get-Date).ToString("o")
-    status         = "running"
-    type           = "comfyui-image"
-    prompt         = $Prompt
-    negativePrompt = $NegativePrompt
-    seed           = $Seed
-    serverUrl      = $ServerUrl
-    workflowPath   = $ResolvedWorkflowOutput
-    promptId       = $null
-    imageCount     = 0
-    imagePath      = $null
-    imagePaths     = @()
+    schemaVersion   = 3
+    jobId           = $JobId
+    assetId         = $AssetId
+    assetVersion    = $Layout.Version
+    generationRoot  = $Layout.Root
+    createdAt       = (Get-Date).ToString("o")
+    status          = "running"
+    type            = "comfyui-image"
+    prompt          = $Prompt
+    negativePrompt  = $NegativePrompt
+    seed            = $Seed
+    serverUrl       = $ServerUrl
+    workflowPath    = $ResolvedWorkflowOutput
+    promptId        = $null
+    imageCount      = 0
+    imagePath       = $null
+    imagePaths      = @()
+}
+
+$StandaloneGeneration = $null
+$StandaloneGenerationPath = $Layout.GenerationMetadataPath
+if ($OwnsGeneration) {
+    $StandaloneGeneration = [ordered]@{
+        schemaVersion = 3
+        generationId = "$AssetId-$($Layout.Version)"
+        assetId = $AssetId
+        assetVersion = $Layout.Version
+        generationRoot = $Layout.Root
+        type = "image-only"
+        engine = "comfyui"
+        createdAt = $JobMetadata.createdAt
+        completedAt = $null
+        status = "running"
+        imagePath = $null
+        metadataPath = $JobMetadataPath
+        error = $null
+    }
 }
 
 try {
     Save-JobMetadata -Metadata $JobMetadata -Path $JobMetadataPath
+    if ($null -ne $StandaloneGeneration) {
+        Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+    }
 } catch {
-    Write-Fail "Could not create job metadata."
+    Write-Fail "Impossible de créer les métadonnées ComfyUI."
     Write-Info $_.Exception.Message
     exit 1
 }
 
-Write-Ok "Job directories created"
-Write-Ok "Resolved workflow saved: $ResolvedWorkflowOutput"
-Write-Ok "Metadata created: $JobMetadataPath"
+Write-Ok "Dossiers de génération prêts"
+Write-Ok "Workflow résolu enregistré : $ResolvedWorkflowOutput"
+Write-Ok "Métadonnées créées : $JobMetadataPath"
 
 # -----------------------------------------------------------------------------
 # Exécution du job
@@ -334,15 +372,15 @@ try {
     $JobMetadata["promptId"] = $PromptId
     Save-JobMetadata -Metadata $JobMetadata -Path $JobMetadataPath
 
-    Write-Ok "Workflow submitted to ComfyUI"
-    Write-Info "PromptId: $PromptId"
+    Write-Ok "Workflow envoyé à ComfyUI"
+    Write-Info "PromptId : $PromptId"
 
     # Attend la fin de l'exécution.
     $HistoryUrl = "$ServerUrl/history/$PromptId"
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $HistoryEntry = $null
 
-    Write-Info "Waiting for ComfyUI generation to complete..."
+    Write-Info "Génération de l’image par ComfyUI en cours..."
 
     while ($Stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         Start-Sleep -Seconds $PollIntervalSeconds
@@ -385,9 +423,9 @@ try {
         }
     }
 
-    Write-Ok "ComfyUI generation completed"
+    Write-Ok "Génération ComfyUI terminée"
 
-    # Valide les sorties SaveImage.
+    # Valide les sorties de l'image.
     if (-not ($HistoryEntry.PSObject.Properties.Name -contains "outputs")) {
         throw "ComfyUI history does not contain outputs."
     }
@@ -395,18 +433,18 @@ try {
     $Outputs = $HistoryEntry.outputs
 
     if ($null -eq $Outputs -or
-        -not ($Outputs.PSObject.Properties.Name -contains $SaveImageNodeId)) {
-        throw "SaveImage node '$SaveImageNodeId' output not found."
+        -not ($Outputs.PSObject.Properties.Name -contains $ImageOutputNodeId)) {
+        throw "Image output node '$ImageOutputNodeId' output not found."
     }
 
-    $SaveOutput = $Outputs.$SaveImageNodeId
+    $ImageOutput = $Outputs.$ImageOutputNodeId
 
-    if ($null -eq $SaveOutput -or
-        -not ($SaveOutput.PSObject.Properties.Name -contains "images")) {
-        throw "No images returned by SaveImage node '$SaveImageNodeId'."
+    if ($null -eq $ImageOutput -or
+        -not ($ImageOutput.PSObject.Properties.Name -contains "images")) {
+        throw "No images returned by Image output node '$ImageOutputNodeId'."
     }
 
-    $GeneratedImages = @($SaveOutput.images)
+    $GeneratedImages = @($ImageOutput.images)
 
     if ($GeneratedImages.Count -eq 0) {
         throw "Generated image list is empty."
@@ -445,14 +483,19 @@ try {
             [uri]::EscapeDataString($subfolder),
             [uri]::EscapeDataString($imageType)
 
-        $destinationName = $filename
+        $extension = [System.IO.Path]::GetExtension($filename)
+        if ([string]::IsNullOrWhiteSpace($extension)) {
+            $extension = ".png"
+        }
+        $destinationName = if ($imageIndex -eq 1) {
+            $AssetId + $extension.ToLowerInvariant()
+        } else {
+            "{0}_{1:D2}{2}" -f $AssetId, $imageIndex, $extension.ToLowerInvariant()
+        }
         $DestinationImagePath = Join-Path $JobGeneratedDir $destinationName
 
         if (Test-Path -LiteralPath $DestinationImagePath) {
-            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($filename)
-            $extension = [System.IO.Path]::GetExtension($filename)
-            $destinationName = "{0}_{1:D2}{2}" -f $baseName, $imageIndex, $extension
-            $DestinationImagePath = Join-Path $JobGeneratedDir $destinationName
+            throw "Generation source image already exists; refusing to overwrite it: $DestinationImagePath"
         }
 
         Invoke-WebRequest `
@@ -471,7 +514,7 @@ try {
         }
 
         $DestinationImagePaths.Add($DestinationImagePath)
-        Write-Ok "Generated image recovered: $DestinationImagePath"
+        if (-not $PipelineManaged) { Write-Ok "Image générée récupérée : $DestinationImagePath" }
     }
 
     if ($DestinationImagePaths.Count -eq 0) {
@@ -486,12 +529,27 @@ try {
     $JobMetadata["imagePaths"] = @($DestinationImagePaths)
 
     Save-JobMetadata -Metadata $JobMetadata -Path $JobMetadataPath
+    if ($null -ne $StandaloneGeneration) {
+        $StandaloneGeneration.status = "completed"
+        $StandaloneGeneration.completedAt = $JobMetadata.completedAt
+        $StandaloneGeneration.imagePath = $DestinationImagePaths[0]
+        Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath
+    }
 
-    Write-Ok "Asset Factory job completed"
-    Write-Ok "Job: $JobId"
-    Write-Ok "Images: $($DestinationImagePaths.Count)"
-    Write-Ok "Image: $($DestinationImagePaths[0])"
-    Write-Ok "Metadata: $JobMetadataPath"
+    if ($PipelineManaged) {
+        Write-Ok "Image générée : $($DestinationImagePaths[0])"
+    } else {
+        Write-Ok "Génération d’image Asset Factory terminée"
+        Write-Ok "Job: $JobId"
+        Write-Ok "Generation: $($Layout.Root)"
+        if (-not [string]::IsNullOrWhiteSpace($Layout.Version)) {
+            Write-Ok "Version: $($Layout.Version)"
+        }
+        Write-Ok "Images: $($DestinationImagePaths.Count)"
+        Write-Ok "Image: $($DestinationImagePaths[0])"
+        Write-Ok "Metadata: $JobMetadataPath"
+        if ($null -ne $StandaloneGeneration) { Write-Ok "Generation metadata: $StandaloneGenerationPath" }
+    }
 
     exit 0
 } catch {
@@ -501,8 +559,14 @@ try {
         -Metadata $JobMetadata `
         -MetadataPath $JobMetadataPath `
         -Message $message
+    if ($null -ne $StandaloneGeneration) {
+        $StandaloneGeneration.status = "failed"
+        $StandaloneGeneration.completedAt = (Get-Date).ToString("o")
+        $StandaloneGeneration.error = $message
+        try { Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath } catch { }
+    }
 
     Write-Fail $message
-    Write-Info "Metadata: $JobMetadataPath"
+    Write-Info "Métadonnées : $JobMetadataPath"
     exit 1
 }

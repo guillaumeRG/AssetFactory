@@ -47,9 +47,9 @@ def configure_offline(models_dir: Path) -> None:
 
 
 def check_local_models(models_dir: Path) -> dict[str, Any]:
-    print("[INFO] Verifying local model files before loading (SHA-256)...", flush=True)
+    print("[INFO] Vérification des modèles locaux avant chargement (SHA-256)...", flush=True)
     result = validate_bundle(models_dir)
-    print("[OK] TRELLIS, DINOv2 and U2Net local files verified.", flush=True)
+    print("[OK] Fichiers locaux TRELLIS, DINOv2 et U2Net vérifiés.", flush=True)
     return result
 
 
@@ -75,7 +75,7 @@ def load_local_pipeline(models_dir: Path):
         def _init_image_cond_model(self, name: str) -> None:
             if name != DINO_MODEL:
                 raise ValueError(f"Unsupported local image conditioning model: {name}")
-            print("[INFO] Loading DINOv2 from local source and weights...", flush=True)
+            print("[INFO] Chargement de DINOv2 depuis les sources et poids locaux...", flush=True)
             encoder = torch.hub.load(
                 str(dino_source), name, source="local", pretrained=False,
             )
@@ -98,7 +98,7 @@ def load_local_pipeline(models_dir: Path):
         # Aucun repli distant comme dans le except large de Pipeline.from_pretrained.
         if not Path(str(base) + ".json").is_file() or not Path(str(base) + ".safetensors").is_file():
             raise FileNotFoundError(f"Incomplete local checkpoint: {base}")
-        print(f"[INFO] Loading local {key}...", flush=True)
+        print(f"[INFO] Chargement local de {key}...", flush=True)
         loaded_models[key] = models.from_pretrained(str(base))
 
     sparse_sampler = config["sparse_structure_sampler"]

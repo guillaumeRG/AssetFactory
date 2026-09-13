@@ -76,6 +76,146 @@ function Assert-AFFileStem {
     }
 }
 
+function Assert-AFAssetVersion {
+    param([string]$Version, [string]$Label = "AssetVersion")
+
+    if ([string]::IsNullOrWhiteSpace($Version) -or $Version -notmatch '^v[0-9]{3,}$') {
+        throw "$Label must use the form v001, v002, ... Got '$Version'."
+    }
+}
+
+function Get-AFAssetRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$AssetId
+    )
+
+    Assert-AFFileStem -Name $AssetId
+    return Join-Path $Root ("outputs\assets\" + $AssetId)
+}
+
+function Get-AFNextAssetVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$AssetId
+    )
+
+    $assetRoot = Get-AFAssetRoot -Root $Root -AssetId $AssetId
+    $maxVersion = 0
+    if (Test-Path -LiteralPath $assetRoot -PathType Container) {
+        foreach ($directory in Get-ChildItem -LiteralPath $assetRoot -Directory -ErrorAction SilentlyContinue) {
+            if ($directory.Name -match '^v([0-9]+)$') {
+                $number = [int]$Matches[1]
+                if ($number -gt $maxVersion) {
+                    $maxVersion = $number
+                }
+            }
+        }
+    }
+    return ('v{0:D3}' -f ($maxVersion + 1))
+}
+
+function Get-AFGenerationLayout {
+    param(
+        [Parameter(Mandatory = $true)][string]$GenerationRoot,
+        [string]$Version = ""
+    )
+
+    $rootPath = [System.IO.Path]::GetFullPath($GenerationRoot)
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        $leaf = Split-Path -Leaf $rootPath
+        if ($leaf -match '^v[0-9]{3,}$') {
+            $Version = $leaf
+        }
+    }
+    return [pscustomobject]@{
+        Root = $rootPath
+        Version = $Version
+        SourceDir = Join-Path $rootPath "source"
+        RawDir = Join-Path $rootPath "raw"
+        FinalDir = Join-Path $rootPath "final"
+        LogsDir = Join-Path $rootPath "logs"
+        MetadataDir = Join-Path $rootPath "metadata"
+        GenerationMetadataPath = Join-Path $rootPath "generation.json"
+    }
+}
+
+function Initialize-AFGenerationLayout {
+    param(
+        [Parameter(Mandatory = $true)][string]$GenerationRoot,
+        [string]$Version = ""
+    )
+
+    $layout = Get-AFGenerationLayout -GenerationRoot $GenerationRoot -Version $Version
+    foreach ($directory in @(
+        $layout.Root,
+        $layout.SourceDir,
+        $layout.RawDir,
+        $layout.FinalDir,
+        $layout.LogsDir,
+        $layout.MetadataDir
+    )) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    return $layout
+}
+
+function New-AFAssetGeneration {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$AssetId,
+        [string]$Version = ""
+    )
+
+    Assert-AFFileStem -Name $AssetId
+    $assetRoot = Get-AFAssetRoot -Root $Root -AssetId $AssetId
+    New-Item -ItemType Directory -Path $assetRoot -Force | Out-Null
+
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        Assert-AFAssetVersion -Version $Version
+        $candidate = Join-Path $assetRoot $Version
+        if (Test-Path -LiteralPath $candidate) {
+            throw "Asset generation already exists: $candidate"
+        }
+        New-Item -ItemType Directory -Path $candidate | Out-Null
+        return Initialize-AFGenerationLayout -GenerationRoot $candidate -Version $Version
+    }
+
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        $candidateVersion = Get-AFNextAssetVersion -Root $Root -AssetId $AssetId
+        $candidate = Join-Path $assetRoot $candidateVersion
+        try {
+            New-Item -ItemType Directory -Path $candidate -ErrorAction Stop | Out-Null
+            return Initialize-AFGenerationLayout -GenerationRoot $candidate -Version $candidateVersion
+        } catch {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
+                throw
+            }
+            Start-Sleep -Milliseconds 10
+        }
+    }
+    throw "Could not allocate a unique generation folder for '$AssetId'."
+}
+
+function Resolve-AFGenerationLayout {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$AssetId,
+        [string]$GenerationRoot = "",
+        [string]$Version = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($GenerationRoot)) {
+        return New-AFAssetGeneration -Root $Root -AssetId $AssetId -Version $Version
+    }
+
+    $resolved = Resolve-AFPath -Path $GenerationRoot -BasePath $Root
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        Assert-AFAssetVersion -Version $Version
+    }
+    return Initialize-AFGenerationLayout -GenerationRoot $resolved -Version $Version
+}
+
 function Get-AFOutputValue {
     param([string[]]$Lines, [string]$Prefix, [switch]$Optional)
 
@@ -96,7 +236,8 @@ function Invoke-AFCommand {
         [Parameter(Mandatory = $true)][string]$Executable,
         [hashtable]$Parameters,
         [string[]]$Arguments = @(),
-        [Parameter(Mandatory = $true)][string]$LogPath
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [string[]]$SuppressConsolePatterns = @()
     )
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -137,7 +278,17 @@ function Invoke-AFCommand {
             $text = $_.ToString()
             $lines.Add($text)
             $writer.WriteLine($text)
-            Write-Host $text
+
+            $showOnConsole = $true
+            foreach ($pattern in $SuppressConsolePatterns) {
+                if ($text -match $pattern) {
+                    $showOnConsole = $false
+                    break
+                }
+            }
+            if ($showOnConsole) {
+                Write-Host $text
+            }
         }
         $exitCode = $executionState.ExitCode
         $failure = $executionState.Error
@@ -235,10 +386,10 @@ function Request-AFComfyMemoryRelease {
     $queue = Invoke-RestMethod -Uri "$baseUrl/queue" -Method Get -TimeoutSec 10
     if (-not ($queue.PSObject.Properties.Name -contains "queue_running") -or
         -not ($queue.PSObject.Properties.Name -contains "queue_pending")) {
-        throw "Unexpected ComfyUI queue response; refusing to unload a possibly busy server."
+        throw "Réponse inattendue de la file ComfyUI ; refus de décharger un serveur potentiellement occupé."
     }
     if (@($queue.queue_running).Count -gt 0 -or @($queue.queue_pending).Count -gt 0) {
-        throw "ComfyUI has other queued/running jobs. Nothing was interrupted. Retry when idle, or use -ReleaseComfyMemory `$false on a separate GPU/server."
+        throw "ComfyUI a d’autres tâches en attente ou en cours. Rien n’a été interrompu. Réessayez lorsqu’il est inactif, ou utilisez -ReleaseComfyMemory `$false sur un autre GPU/serveur."
     }
 
     $body = [System.Text.Encoding]::UTF8.GetBytes('{"unload_models":true,"free_memory":true}')
@@ -255,27 +406,27 @@ function Request-AFComfyMemoryRelease {
         $cudaDevices = @($devices | Where-Object { (Get-AFProperty $_ "type" "") -eq "cuda" })
         if ($cudaDevices.Count -eq 0) {
             if ($devices.Count -eq 0) {
-                throw "ComfyUI system_stats returned no devices. Cannot verify memory release."
+                throw "ComfyUI system_stats ne retourne aucun périphérique ; impossible de vérifier la libération mémoire."
             }
             return [ordered]@{
                 reservedBytes = 0
-                message = "ComfyUI does not report a CUDA device."
+                message = "ComfyUI ne signale aucun périphérique CUDA."
             }
         }
         $reservedBytes = [long]0
         foreach ($device in $cudaDevices) {
             if (-not ($device.PSObject.Properties.Name -contains "torch_vram_total")) {
-                throw "ComfyUI does not expose torch_vram_total. Use -ReleaseComfyMemory `$false only after managing VRAM separately."
+                throw "ComfyUI n’expose pas torch_vram_total. Utilisez -ReleaseComfyMemory `$false uniquement si la VRAM est gérée séparément."
             }
             $reservedBytes += [long]$device.torch_vram_total
         }
         if ($reservedBytes -le 256MB) {
             return [ordered]@{
                 reservedBytes = $reservedBytes
-                message = "ComfyUI CUDA reservation is below 256 MiB."
+                message = "La réservation CUDA de ComfyUI est inférieure à 256 Mio."
             }
         }
     } while ((Get-Date) -lt $deadline)
 
-    throw "ComfyUI accepted /free but still reserves $reservedBytes bytes after $TimeoutSeconds seconds. The PNG is preserved; no 3D generation was launched."
+    throw "ComfyUI a accepté /free mais réserve encore $reservedBytes octets après $TimeoutSeconds secondes. Le PNG est conservé ; aucune génération 3D n’a été lancée."
 }
