@@ -1,13 +1,15 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "status", "doctor", "triposr", "comfyui", "trellis", "help")]
+    [ValidateSet("install", "status", "doctor", "triposr", "comfyui", "trellis", "multiview", "help")]
     [string]$Command = "help",
 
     [Parameter(Position = 1)]
-    [Alias("TriposrCommand", "ComfyUiCommand", "TrellisCommand")]
+    [Alias("TriposrCommand", "ComfyUiCommand", "TrellisCommand", "MultiViewCommand")]
     [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install", "model-status", "runtime-install", "runtime-status", "runtime-doctor", "native-install", "native-status", "native-doctor")]
     [string]$EngineCommand = "status",
+
+    [string]$Method = "zero123plus-v1.1",
 
     [switch]$NoInstall
 )
@@ -15,7 +17,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "0.6.23"
+$ScriptVersion = "0.7.1"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $MinimumPowerShellVersion = [version]"5.1"
 $Script:HadWarnings = $false
@@ -35,6 +37,7 @@ $RequiredDirs = @(
     "workflows",
     "batches",
     "docs",
+    "config",
     "profiles",
     "unreal"
 )
@@ -138,6 +141,31 @@ $ComfyUiFluxRepoId = "Comfy-Org/flux1-schnell"
 $ComfyUiFluxFileName = "flux1-schnell-fp8.safetensors"
 $ComfyUiFluxModelsDir = Join-Path $ComfyUiRoot "models\checkpoints"
 $ComfyUiFluxModelPath = Join-Path $ComfyUiFluxModelsDir $ComfyUiFluxFileName
+
+# Configuration des méthodes image-vers-multi-vues. La première implémentation
+# utilise Zero123++ v1.1 dans un environnement isolé. Le registre versionné
+# config/multiview-methods.json reste la source de vérité côté orchestration.
+$MultiViewDefaultMethod = "zero123plus-v1.1"
+$Zero123PlusRepoUrl = "https://github.com/SUDO-AI-3D/zero123plus.git"
+$Zero123PlusPinnedCommit = "7d0315c31be6eb906b34cf07d91310f8e12e9b95"
+$Zero123PlusRoot = Join-Path $ProjectRoot "engines\zero123plus"
+$Zero123PlusVenv = Join-Path $Zero123PlusRoot ".venv"
+$Zero123PlusVenvPython = Join-Path $Zero123PlusVenv "Scripts\python.exe"
+$Zero123PlusPythonVersion = "3.11"
+$Zero123PlusTorchVersion = "2.13.0"
+$Zero123PlusTorchIndexUrl = "https://download.pytorch.org/whl/cu130"
+$Zero123PlusExpectedTorchCuda = "13.0"
+$Zero123PlusModelRoot = Join-Path $ProjectRoot "models\multiview\zero123plus-v1.1"
+$MultiViewModelHelper = Join-Path $ProjectRoot "tools\multiview_models.py"
+$Zero123PlusPackages = @(
+    "diffusers==0.20.2",
+    "transformers==4.29.2",
+    "accelerate==0.23.0",
+    "huggingface_hub==0.19.4",
+    "safetensors",
+    "pillow",
+    "numpy<2"
+)
 
 
 function Write-Header {
@@ -4790,6 +4818,275 @@ function Invoke-ComfyUiCommand {
     }
 }
 
+
+function Assert-MultiViewMethod {
+    if ([string]::IsNullOrWhiteSpace($Method)) {
+        $script:Method = $MultiViewDefaultMethod
+    }
+    if ($Method -ne "zero123plus-v1.1") {
+        throw "Méthode multi-vues non prise en charge par ce setup : '$Method'. Méthode disponible : zero123plus-v1.1."
+    }
+}
+
+function Get-MultiViewPythonInfo {
+    $path = Get-PythonPathForVersion -Version $Zero123PlusPythonVersion
+    if ($path) {
+        return [pscustomobject]@{ Installed = $true; Version = $Zero123PlusPythonVersion; Path = $path }
+    }
+    return [pscustomobject]@{ Installed = $false; Version = $null; Path = $null }
+}
+
+function Ensure-MultiViewPython {
+    $python = Get-MultiViewPythonInfo
+    if ($python.Installed) {
+        Write-Result "OK" "Python $($python.Version) disponible pour $Method - $($python.Path)"
+        return $python
+    }
+    if ($NoInstall) {
+        throw "$Method nécessite Python $Zero123PlusPythonVersion. -NoInstall interdit son installation."
+    }
+    Install-WingetPackage -Id "Python.Python.3.11" -DisplayName "Python 3.11 for Asset Factory multiview"
+    Refresh-ProcessPath
+    $python = Get-MultiViewPythonInfo
+    if (-not $python.Installed) {
+        throw "Python 3.11 a été installé mais reste introuvable. Ouvrez un nouveau terminal puis relancez 'multiview install'."
+    }
+    return $python
+}
+
+function Test-Zero123PlusRepository {
+    if (-not (Test-Path -LiteralPath $Zero123PlusRoot -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "missing"; Origin = $null; Message = "engines\\zero123plus absent" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Zero123PlusRoot ".git") -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "partial"; Origin = $null; Message = "engines\\zero123plus n'est pas un dépôt Git" }
+    }
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Git indisponible" }
+    }
+    $originResult = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "remote", "get-url", "origin")
+    if ($originResult.ExitCode -ne 0 -or $originResult.Output.Count -eq 0) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Impossible de lire l'origine Zero123++" }
+    }
+    $origin = $originResult.Output[0].ToString().Trim()
+    if ((Normalize-GitRemoteUrl $origin) -ne (Normalize-GitRemoteUrl $Zero123PlusRepoUrl)) {
+        return [pscustomobject]@{ Valid = $false; State = "wrong-origin"; Origin = $origin; Message = "Origine Zero123++ inattendue" }
+    }
+    $pipeline = Join-Path $Zero123PlusRoot "diffusers-support\pipeline.py"
+    if (-not (Test-Path -LiteralPath $pipeline -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "diffusers-support\\pipeline.py absent" }
+    }
+    return [pscustomobject]@{ Valid = $true; State = "ready"; Origin = $origin; Message = "Dépôt Zero123++ officiel présent" }
+}
+
+function Ensure-Zero123PlusRepository {
+    $git = Get-GitInfo
+    if (-not $git.Installed) { throw "Git est requis pour installer Zero123++." }
+    $enginesDir = Join-Path $ProjectRoot "engines"
+    New-Item -ItemType Directory -Path $enginesDir -Force | Out-Null
+
+    $state = Test-Zero123PlusRepository
+    if ($state.State -eq "missing") {
+        Write-Result "INFO" "Clonage de Zero123++..."
+        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $Zero123PlusRepoUrl, $Zero123PlusRoot)
+        if ($clone.ExitCode -ne 0) { throw "Échec du clonage Zero123++ : $($clone.Output -join ' | ')" }
+    } elseif (-not $state.Valid) {
+        throw "Dépôt Zero123++ invalide : $($state.Message). Rien n'a été supprimé."
+    }
+
+    $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "status", "--porcelain", "--untracked-files=no")
+    if ($dirty.ExitCode -ne 0) { throw "Impossible de vérifier l'état du dépôt Zero123++." }
+    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "rev-parse", "HEAD")
+    if ($head.ExitCode -ne 0 -or $head.Output.Count -eq 0) { throw "Impossible de lire le HEAD Zero123++." }
+    if ($head.Output[0].ToString().Trim() -ne $Zero123PlusPinnedCommit) {
+        if ($dirty.Output.Count -gt 0) { throw "Le checkout Zero123++ contient des modifications suivies ; refus de changer de révision." }
+        $fetch = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "fetch", "origin", $Zero123PlusPinnedCommit)
+        if ($fetch.ExitCode -ne 0) { throw "Impossible de récupérer la révision Zero123++ épinglée : $($fetch.Output -join ' | ')" }
+        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "checkout", "--detach", $Zero123PlusPinnedCommit)
+        if ($checkout.ExitCode -ne 0) { throw "Impossible d'activer la révision Zero123++ épinglée : $($checkout.Output -join ' | ')" }
+    }
+    $verify = Test-Zero123PlusRepository
+    if (-not $verify.Valid) { throw "Validation du dépôt Zero123++ échouée : $($verify.Message)" }
+    Write-Result "OK" "Zero123++ prêt à la révision $($Zero123PlusPinnedCommit.Substring(0, 7))"
+}
+
+function Ensure-MultiViewVenv {
+    if (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf) {
+        $probe = Invoke-NativeCapture -Executable $Zero123PlusVenvPython -Arguments @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        if ($probe.ExitCode -eq 0 -and $probe.Output.Count -gt 0 -and $probe.Output[0].ToString().Trim() -eq $Zero123PlusPythonVersion) {
+            Write-Result "OK" "Environnement virtuel multi-vues Python $Zero123PlusPythonVersion réutilisé"
+            return
+        }
+        if ($NoInstall) { throw "Environnement virtuel multi-vues invalide et -NoInstall actif." }
+        Remove-Item -LiteralPath $Zero123PlusVenv -Recurse -Force
+    } elseif (Test-Path -LiteralPath $Zero123PlusVenv) {
+        if ($NoInstall) { throw "Environnement virtuel multi-vues incomplet et -NoInstall actif." }
+        Remove-Item -LiteralPath $Zero123PlusVenv -Recurse -Force
+    }
+
+    $python = Ensure-MultiViewPython
+    $create = Invoke-NativeCapture -Executable $python.Path -Arguments @("-m", "venv", $Zero123PlusVenv)
+    if ($create.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
+        throw "Impossible de créer l'environnement virtuel multi-vues : $($create.Output -join ' | ')"
+    }
+    Write-Result "OK" "Environnement virtuel multi-vues créé"
+}
+
+function Invoke-MultiViewPython {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
+        throw "Environnement multi-vues absent. Lancez '.\\setup-asset-factory.ps1 multiview install'."
+    }
+    return Invoke-NativeCapture -Executable $Zero123PlusVenvPython -Arguments $Arguments -WorkingDirectory $ProjectRoot
+}
+
+function Ensure-MultiViewPackages {
+    $pip = Invoke-MultiViewPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
+    if ($pip.ExitCode -ne 0) { throw "Mise à jour de pip impossible : $($pip.Output -join ' | ')" }
+
+    $torchProbe = Invoke-MultiViewPython -Arguments @("-c", "import torch, torchvision; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())")
+    $needTorch = $true
+    if ($torchProbe.ExitCode -eq 0 -and $torchProbe.Output.Count -ge 3) {
+        $torchVersion = $torchProbe.Output[0].ToString().Split('+')[0]
+        $cudaVersion = $torchProbe.Output[1].ToString().Trim()
+        $cudaAvailable = $torchProbe.Output[2].ToString().Trim().ToLowerInvariant() -eq "true"
+        if ($torchVersion -eq $Zero123PlusTorchVersion -and $cudaVersion -eq $Zero123PlusExpectedTorchCuda -and $cudaAvailable) {
+            $needTorch = $false
+        }
+    }
+    if ($needTorch) {
+        if ($NoInstall) { throw "PyTorch CUDA attendu absent de l'environnement multi-vues et -NoInstall actif." }
+        Write-Result "INFO" "Installation de PyTorch $Zero123PlusTorchVersion / CUDA $Zero123PlusExpectedTorchCuda..."
+        $torchInstall = Invoke-MultiViewPython -Arguments @("-m", "pip", "install", "torch==$Zero123PlusTorchVersion", "torchvision", "--index-url", $Zero123PlusTorchIndexUrl)
+        if ($torchInstall.ExitCode -ne 0) { throw "Installation PyTorch multi-vues échouée : $($torchInstall.Output -join ' | ')" }
+    }
+
+    if (-not $NoInstall) {
+        $args = @("-m", "pip", "install") + $Zero123PlusPackages
+        $deps = Invoke-MultiViewPython -Arguments $args
+        if ($deps.ExitCode -ne 0) { throw "Installation des dépendances multi-vues échouée : $($deps.Output -join ' | ')" }
+    }
+
+    $verify = Invoke-MultiViewPython -Arguments @(
+        "-c",
+        "import torch, torchvision, diffusers, transformers, huggingface_hub, PIL; assert torch.cuda.is_available(); assert torch.version.cuda == '$Zero123PlusExpectedTorchCuda'; print(torch.__version__); print(diffusers.__version__); print(transformers.__version__)"
+    )
+    if ($verify.ExitCode -ne 0) { throw "Validation des dépendances multi-vues échouée : $($verify.Output -join ' | ')" }
+    Write-Result "OK" "Runtime multi-vues validé"
+}
+
+function Get-MultiViewModelState {
+    if (-not (Test-Path -LiteralPath $MultiViewModelHelper -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; Message = "tools\\multiview_models.py absent" }
+    }
+    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
+        return [pscustomobject]@{ Valid = $false; Message = "venv multi-vues absent" }
+    }
+    $check = Invoke-MultiViewPython -Arguments @("-B", $MultiViewModelHelper, "check", "--method", $Method, "--root", $Zero123PlusModelRoot)
+    return [pscustomobject]@{ Valid = ($check.ExitCode -eq 0); Message = ($check.Output -join " | ") }
+}
+
+function Invoke-MultiViewModelInstall {
+    Assert-MultiViewMethod
+    Write-Header "Multi-vues Model Install"
+    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
+        throw "Runtime multi-vues absent. Lancez '.\\setup-asset-factory.ps1 multiview install' d'abord."
+    }
+    if ($NoInstall) {
+        $state = Get-MultiViewModelState
+        if (-not $state.Valid) { throw "Modèle multi-vues invalide : $($state.Message)" }
+        Write-Result "OK" "Modèle $Method validé localement"
+        return
+    }
+    Write-Result "INFO" "Téléchargement/vérification du modèle $Method..."
+    $result = Invoke-MultiViewPython -Arguments @("-B", $MultiViewModelHelper, "install", "--method", $Method, "--root", $Zero123PlusModelRoot)
+    if ($result.ExitCode -ne 0) { throw "Installation du modèle multi-vues échouée : $($result.Output -join ' | ')" }
+    Write-Result "OK" "Modèle $Method prêt : $Zero123PlusModelRoot"
+}
+
+function Show-MultiViewStatus {
+    Assert-MultiViewMethod
+    Write-Header "Multi-vues Status"
+    $repo = Test-Zero123PlusRepository
+    if ($repo.Valid) {
+        $git = Get-GitInfo
+        $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "rev-parse", "HEAD")
+        $headValue = if ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0) { $head.Output[0].ToString().Trim() } else { "inconnu" }
+        if ($headValue -eq $Zero123PlusPinnedCommit) { Write-Result "OK" "Zero123++ source : $($headValue.Substring(0, 7))" }
+        else { Write-Result "WARN" "Zero123++ source : $headValue / attendu $($Zero123PlusPinnedCommit.Substring(0,7))" }
+    } else {
+        Write-Result "MISSING" $repo.Message
+    }
+    if (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf) {
+        Write-Result "OK" "Venv : $Zero123PlusVenvPython"
+    } else {
+        Write-Result "MISSING" "Environnement virtuel multi-vues"
+    }
+    $model = Get-MultiViewModelState
+    if ($model.Valid) { Write-Result "OK" "Modèle $Method local validé" }
+    else { Write-Result "MISSING" "Modèle $Method non prêt. Utilisez 'multiview model-install'." }
+}
+
+function Invoke-MultiViewDoctor {
+    Assert-MultiViewMethod
+    Write-Header "Multi-vues Doctor"
+    $failures = 0
+    $repo = Test-Zero123PlusRepository
+    if (-not $repo.Valid) { Write-Result "FAIL" $repo.Message; $failures++ }
+    else { Write-Result "OK" "Dépôt Zero123++ valide" }
+    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
+        Write-Result "FAIL" "Venv multi-vues absent"; $failures++
+    } else {
+        $probe = Invoke-MultiViewPython -Arguments @("-c", "import torch, diffusers, transformers; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0)); print(diffusers.__version__)")
+        if ($probe.ExitCode -ne 0) { Write-Result "FAIL" "Runtime multi-vues invalide : $($probe.Output -join ' | ')"; $failures++ }
+        else { Write-Result "OK" "Runtime CUDA multi-vues opérationnel" }
+    }
+    $model = Get-MultiViewModelState
+    if (-not $model.Valid) { Write-Result "FAIL" "Modèle $Method absent ou invalide"; $failures++ }
+    else { Write-Result "OK" "Modèle $Method local validé" }
+    if ($failures -gt 0) { return 1 }
+    Write-Result "OK" "Méthode multi-vues prête"
+    return 0
+}
+
+function Invoke-MultiViewInstall {
+    Assert-MultiViewMethod
+    Write-Header "Multi-vues Install"
+    Assert-BootstrapHost
+    if ($NoInstall) {
+        $exitCode = Invoke-MultiViewDoctor
+        if ($exitCode -ne 0) { throw "Validation multi-vues échouée avec -NoInstall." }
+        return
+    }
+    $git = Get-GitInfo
+    if (-not $git.Installed) { Install-WingetPackage -Id "Git.Git" -DisplayName "Git"; Refresh-ProcessPath }
+    $gpu = Get-NvidiaInfo
+    if (-not $gpu.Available) { throw "GPU NVIDIA introuvable avec nvidia-smi." }
+    Write-Result "OK" "GPU NVIDIA : $($gpu.Name), $($gpu.VramMiB) MiB VRAM"
+    Ensure-Zero123PlusRepository
+    Ensure-MultiViewVenv
+    Ensure-MultiViewPackages
+    Write-Result "OK" "Runtime de $Method installé. Utilisez ensuite 'multiview model-install'."
+}
+
+function Invoke-MultiViewCommand {
+    Assert-MultiViewMethod
+    switch ($EngineCommand) {
+        "install" { Invoke-MultiViewInstall }
+        "status" { Show-MultiViewStatus }
+        "doctor" { $exitCode = Invoke-MultiViewDoctor; if ($exitCode -ne 0) { exit $exitCode } }
+        "model-install" { Invoke-MultiViewModelInstall }
+        "model-status" {
+            $state = Get-MultiViewModelState
+            if ($state.Valid) { Write-Result "OK" "Modèle $Method local validé" }
+            else { Write-Result "MISSING" $state.Message; exit 1 }
+        }
+        "repair" { Invoke-MultiViewInstall }
+        default { throw "Sous-commande '$EngineCommand' non prise en charge pour multiview." }
+    }
+}
+
 function Show-Status {
     Write-Header "Status"
     Write-Result "INFO" "Setup script version $ScriptVersion"
@@ -5072,6 +5369,10 @@ Usage:
   .\setup-asset-factory.ps1 comfyui smoke
   .\setup-asset-factory.ps1 comfyui repair
   .\setup-asset-factory.ps1 comfyui model-install
+  .\setup-asset-factory.ps1 multiview install -Method zero123plus-v1.1
+  .\setup-asset-factory.ps1 multiview model-install -Method zero123plus-v1.1
+  .\setup-asset-factory.ps1 multiview status -Method zero123plus-v1.1
+  .\setup-asset-factory.ps1 multiview doctor -Method zero123plus-v1.1
   .\setup-asset-factory.ps1 trellis install
   .\setup-asset-factory.ps1 trellis status
   .\setup-asset-factory.ps1 trellis doctor
@@ -5094,6 +5395,7 @@ Commands:
   doctor    Run smoke tests for Git, Python, Blender headless, GPU query and repository structure.
   triposr   Manage the isolated TripoSR engine. Subcommands: install, status, doctor, repair, smoke.
   comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair, model-install.
+  multiview Manage optional image-to-multiview methods. The first provider is Zero123++ v1.1.
   trellis   Manage TRELLIS v1. AF-08A handles the pinned official repo/bootstrap venv;
             AF-08B runtime-* handles the isolated Python 3.12 / PyTorch CUDA 13 runtime foundation;
             AF-08C native-* validates CUDA/MSVC/sm_120, PyTorch SDPA and required TRELLIS native extensions.
@@ -5107,6 +5409,7 @@ Important:
   - TripoSR is opt-in: use `triposr install`; it never installs packages into global Python.
   - ComfyUI is opt-in: use `comfyui install`; it uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
   - The FLUX Schnell checkpoint is opt-in: use `comfyui model-install`; an existing valid checkpoint is reused.
+  - Multi-view generation is opt-in and isolated; use `multiview install`, then `multiview model-install`.
   - TRELLIS v1 is pinned to a validated source revision and uses separate bootstrap/runtime venvs.
   - TRELLIS runtime PyTorch CUDA 13 is isolated; the system CUDA Toolkit used by other engines is not replaced.
   - AF-08C uses PyTorch SDPA on Blackwell. Upstream TRELLIS 442aa1e has no sparse SDPA backend; unsupported xformers builds are removed rather than selected.
@@ -5138,6 +5441,7 @@ try {
         "triposr" { Invoke-TripoSrCommand }
         "comfyui" { Invoke-ComfyUiCommand }
         "trellis" { Invoke-TrellisCommand }
+        "multiview" { Invoke-MultiViewCommand }
         "help"    { Show-Help }
     }
 } catch {

@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
@@ -24,6 +24,9 @@ param(
     [string]$AssetId = "",
     [string]$GenerationRoot = "",
     [string]$AssetVersion = "",
+    [string]$OutputFileStem = "",
+    [string]$SourceSubfolder = "",
+    [string]$MetadataPrefix = "comfyui",
     [switch]$PipelineManaged
 )
 
@@ -234,10 +237,35 @@ try {
 # Création de l'identité de génération et personnalisation du workflow
 # -----------------------------------------------------------------------------
 
+function Assert-SafeRelativeSubfolder {
+    param([string]$Path, [string]$Label = "SourceSubfolder")
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        throw "$Label doit être un chemin relatif : '$Path'."
+    }
+
+    $segments = @($Path -split '[\\/]' | Where-Object { $_ -ne "" })
+    if ($segments.Count -eq 0) {
+        throw "$Label ne contient aucun dossier valide : '$Path'."
+    }
+    foreach ($segment in $segments) {
+        if ($segment -in @(".", "..")) {
+            throw "$Label ne peut pas contenir '.' ou '..' : '$Path'."
+        }
+        Assert-AFFileStem -Name $segment -Label $Label
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($AssetId)) {
     $AssetId = "Image_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 }
 Assert-AFFileStem -Name $AssetId
+if ([string]::IsNullOrWhiteSpace($OutputFileStem)) { $OutputFileStem = $AssetId }
+Assert-AFFileStem -Name $OutputFileStem
+Assert-SafeRelativeSubfolder -Path $SourceSubfolder
+if ([string]::IsNullOrWhiteSpace($MetadataPrefix)) { throw "MetadataPrefix ne peut pas être vide." }
+Assert-AFFileStem -Name $MetadataPrefix -Label "MetadataPrefix"
 
 $Layout = Resolve-AFGenerationLayout `
     -Root $AssetFactoryRoot `
@@ -264,10 +292,14 @@ Write-Info "JobId : $JobId"
 
 $JobRoot = $Layout.Root
 $JobWorkflowDir = $Layout.MetadataDir
-$JobGeneratedDir = $Layout.SourceDir
+$JobGeneratedDir = if ([string]::IsNullOrWhiteSpace($SourceSubfolder)) {
+    $Layout.SourceDir
+} else {
+    Join-Path $Layout.SourceDir $SourceSubfolder
+}
 $JobLogsDir = $Layout.LogsDir
-$ResolvedWorkflowOutput = Join-Path $JobWorkflowDir "comfyui-workflow.json"
-$JobMetadataPath = Join-Path $Layout.MetadataDir "comfyui.json"
+$ResolvedWorkflowOutput = Join-Path $JobWorkflowDir ($MetadataPrefix + "-workflow.json")
+$JobMetadataPath = Join-Path $Layout.MetadataDir ($MetadataPrefix + ".json")
 
 try {
     foreach ($directory in @($JobRoot, $JobWorkflowDir, $JobGeneratedDir, $JobLogsDir)) {
@@ -298,6 +330,8 @@ $JobMetadata = [ordered]@{
     serverUrl       = $ServerUrl
     workflowPath    = $ResolvedWorkflowOutput
     promptId        = $null
+    outputFileStem  = $OutputFileStem
+    sourceSubfolder = $SourceSubfolder
     imageCount      = 0
     imagePath       = $null
     imagePaths      = @()
@@ -488,9 +522,9 @@ try {
             $extension = ".png"
         }
         $destinationName = if ($imageIndex -eq 1) {
-            $AssetId + $extension.ToLowerInvariant()
+            $OutputFileStem + $extension.ToLowerInvariant()
         } else {
-            "{0}_{1:D2}{2}" -f $AssetId, $imageIndex, $extension.ToLowerInvariant()
+            "{0}_{1:D2}{2}" -f $OutputFileStem, $imageIndex, $extension.ToLowerInvariant()
         }
         $DestinationImagePath = Join-Path $JobGeneratedDir $destinationName
 

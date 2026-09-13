@@ -1,4 +1,4 @@
-# Asset Factory V0.7
+﻿# Asset Factory V0.7
 
 Asset Factory est une chaîne de génération et de préparation locale d'assets 3D à partir d'un prompt texte.
 
@@ -90,6 +90,13 @@ Installer TRELLIS si ce moteur doit être utilisé :
 ```powershell
 .\setup-asset-factory.ps1 trellis runtime-install
 .\setup-asset-factory.ps1 trellis model-install
+```
+
+Installer la génération multi-vues si elle doit être utilisée :
+
+```powershell
+.\setup-asset-factory.ps1 multiview install -Method zero123plus-v1.1
+.\setup-asset-factory.ps1 multiview model-install -Method zero123plus-v1.1
 ```
 
 Vérifier l'installation :
@@ -352,6 +359,23 @@ Pour vérifier leur présence :
 ```powershell
 .\setup-asset-factory.ps1 trellis model-status
 ```
+
+---
+
+## Génération multi-vues (optionnelle)
+
+Pour générer plusieurs vues cohérentes depuis une seule image de référence :
+
+```powershell
+.\tools\run-multiview.ps1 `
+    -Prompt "A rugged industrial portable work light, single isolated object" `
+    -AssetId "WorkLight_01" `
+    -Method "zero123plus-v1.1"
+```
+
+Une image existante peut être fournie avec `-ReferenceImage`. Les paramètres d'une méthode peuvent être définis en ligne de commande ou dans un profil multi-vues.
+
+Voir [`docs/MULTIVIEW.md`](docs/MULTIVIEW.md) pour les méthodes disponibles et leur configuration.
 
 ---
 

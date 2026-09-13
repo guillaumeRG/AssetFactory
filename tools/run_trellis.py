@@ -152,17 +152,28 @@ def _run(args: argparse.Namespace) -> int:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable")
 
-    input_path = Path(args.input).expanduser().resolve()
+    input_paths = [Path(value).expanduser().resolve() for value in args.input]
+    if not input_paths:
+        raise ValueError("Au moins une image d'entrée est requise.")
+    for input_path in input_paths:
+        if not input_path.is_file():
+            raise FileNotFoundError(f"Image d'entrée introuvable : {input_path}")
+
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Conserve le nom de l'image d'entrée ; seule son extension finale est remplacée.
-    output_glb = output_dir / (input_path.stem + ".glb")
-
-    if not input_path.is_file():
-        raise FileNotFoundError(f"Input image does not exist: {input_path}")
+    output_stem = args.asset_id.strip() if args.asset_id else input_paths[0].stem
+    if len(input_paths) > 1 and not args.asset_id:
+        raise ValueError("--asset-id est requis lorsque plusieurs images sont fournies.")
+    output_glb = output_dir / (output_stem + ".glb")
 
     print(f"[INFO] Racine TRELLIS : {trellis_root}")
-    print(f"[INFO] Entrée : {input_path}")
+    if len(input_paths) == 1:
+        print(f"[INFO] Entrée : {input_paths[0]}")
+    else:
+        print(f"[INFO] Entrées multi-vues : {len(input_paths)} images")
+        for index, input_path in enumerate(input_paths, start=1):
+            print(f"[INFO]   Vue {index:02d} : {input_path}")
+        print(f"[INFO] Fusion multi-image TRELLIS : {args.multi_image_mode}")
     print(f"[INFO] Sortie : {output_glb}")
     print("[INFO] Attention dense : PyTorch SDPA")
     print("[INFO] Attention creuse : shim API xFormers Asset Factory -> PyTorch SDPA")
@@ -180,18 +191,28 @@ def _run(args: argparse.Namespace) -> int:
     pipeline = load_local_pipeline(args.models_dir)
     pipeline.cuda()
 
-    with Image.open(input_path) as source:
-        image = source.copy()
+    images = []
+    for input_path in input_paths:
+        with Image.open(input_path) as source:
+            images.append(source.copy())
 
     # Ne décode que ce qui est nécessaire à l'export GLB. L'exemple officiel décode aussi
     # un champ de radiance et génère trois vidéos ; omettre ces chemins réduit la VRAM
     # et le calcul sur la cible Asset Factory d'environ 8 Gio sans modifier la génération
     # du maillage/GS requise par to_glb().
-    outputs = pipeline.run(
-        image,
-        seed=args.seed,
-        formats=["mesh", "gaussian"],
-    )
+    if len(images) == 1:
+        outputs = pipeline.run(
+            images[0],
+            seed=args.seed,
+            formats=["mesh", "gaussian"],
+        )
+    else:
+        outputs = pipeline.run_multi_image(
+            images,
+            seed=args.seed,
+            formats=["mesh", "gaussian"],
+            mode=args.multi_image_mode,
+        )
 
     glb = postprocessing_utils.to_glb(
         outputs["gaussian"][0],
@@ -202,7 +223,7 @@ def _run(args: argparse.Namespace) -> int:
     glb.export(str(output_glb))
 
     if args.save_ply:
-        output_ply = output_dir / (input_path.stem + ".ply")
+        output_ply = output_dir / (output_stem + ".ply")
         outputs["gaussian"][0].save_ply(str(output_ply))
         print(f"[OK] PLY : {output_ply}")
 
@@ -217,8 +238,20 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Asset Factory TRELLIS runner with PyTorch-SDPA sparse compatibility"
     )
-    parser.add_argument("--input")
+    parser.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        help="Image d'entrée. Répétez --input pour activer le mode multi-image.",
+    )
+    parser.add_argument("--asset-id", default="")
     parser.add_argument("--output-dir")
+    parser.add_argument(
+        "--multi-image-mode",
+        choices=("stochastic", "multidiffusion"),
+        default="stochastic",
+        help="Méthode de fusion utilisée par TRELLIS lorsque plusieurs images sont fournies.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--models-dir", type=Path, default=default_models_dir())
     parser.add_argument("--check-models", action="store_true")
@@ -230,7 +263,7 @@ def _parse_args() -> argparse.Namespace:
 
     if not args.self_test and not args.check_models:
         if not args.input:
-            parser.error("--input is required unless --self-test is used")
+            parser.error("--input est requis sauf avec --self-test ou --check-models")
         if not args.output_dir:
             parser.error("--output-dir is required unless --self-test is used")
     return args

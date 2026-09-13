@@ -27,7 +27,7 @@ def test_no_python_generated_or_inline_in_runner():
 
 
 def test_filename_rule_and_offline_mode_are_kept():
-    assert 'GetFileNameWithoutExtension($resolvedInput)' in RUNNER
+    assert 'GetFileNameWithoutExtension($resolvedInputs[0])' in RUNNER
     assert '($assetName + ".glb")' in RUNNER
     assert '"--models-dir", $ModelsDir' in RUNNER
     assert '$env:ATTN_BACKEND = "sdpa"' in RUNNER

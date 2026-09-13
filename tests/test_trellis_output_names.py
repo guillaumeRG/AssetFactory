@@ -29,9 +29,9 @@ class OutputNameTests(unittest.TestCase):
             before = input_path.read_bytes()
             output_dir = root / 'outputs' / 'unique-job'
             args = SimpleNamespace(
-                input=str(input_path), output_dir=str(output_dir),
+                input=[str(input_path)], asset_id='', output_dir=str(output_dir),
                 models_dir=root / 'models', seed=1, simplify=0.95,
-                texture_size=1024, save_ply=save_ply,
+                texture_size=1024, save_ply=save_ply, multi_image_mode='stochastic',
             )
             torch = ModuleType('torch')
             torch.cuda = SimpleNamespace(
@@ -106,7 +106,7 @@ class OutputNameTests(unittest.TestCase):
 
     def test_powershell_expected_filename_matches_python_convention(self):
         text = (TOOLS / 'run-trellis.ps1').read_text(encoding='utf-8-sig')
-        self.assertIn('[System.IO.Path]::GetFileNameWithoutExtension($resolvedInput)', text)
+        self.assertIn('[System.IO.Path]::GetFileNameWithoutExtension($resolvedInputs[0])', text)
         self.assertIn('Join-Path $resolvedOutput ($assetName + ".glb")', text)
         self.assertNotIn('Join-Path $resolvedOutput "asset.glb"', text)
 

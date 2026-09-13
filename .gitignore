@@ -22,3 +22,5 @@ engines/comfyui/
 profiles/*.json
 !profiles/unreal.example.json
 engines/trellis/
+engines/zero123plus/
+!profiles/multiview.example.json

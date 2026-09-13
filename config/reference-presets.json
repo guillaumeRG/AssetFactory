@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "defaultPreset": "multiview-object",
+  "presets": {
+    "multiview-object": {
+      "positiveSuffix": "single isolated object, centered in frame, full object visible, clean studio product render, neutral plain background, three-quarter frontal angle, consistent materials, clear silhouette, realistic proportions, no cut-off parts",
+      "negativeSuffix": "multiple objects, duplicated object, cluttered scene, room environment, person, hand, text, watermark, logo, crop, close-up detail shot, extreme perspective, fisheye, pedestal, turntable stand, blurry image"
+    },
+    "multiview-handheld": {
+      "positiveSuffix": "single handheld object, centered in frame, fully visible, clean product render, neutral plain background, readable silhouette, realistic proportions, moderate perspective, consistent materials",
+      "negativeSuffix": "multiple objects, person, hand holding object, clutter, cropped object, close-up macro, dramatic perspective, wide-angle distortion, text, watermark, blurry image"
+    },
+    "multiview-rigid": {
+      "positiveSuffix": "single rigid isolated object, centered in frame, full object visible, clean studio product render, neutral plain background, three-quarter frontal angle, consistent materials, clear silhouette, realistic proportions, solid hard-surface construction, no cut-off parts",
+      "negativeSuffix": "multiple objects, duplicated object, cluttered scene, room environment, person, hand, text, watermark, logo, crop, close-up detail shot, extreme perspective, fisheye, loose cable, dangling cable, wire, hose, chain, strap, rope, thin flexible appendage, blurry image"
+    }
+  }
+}

@@ -3,6 +3,11 @@ param(
     [Parameter(Position = 0)]
     [string]$InputPath,
 
+    [string[]]$InputPaths = @(),
+
+    [ValidateSet("stochastic", "multidiffusion")]
+    [string]$MultiImageMode = "stochastic",
+
     [string]$OutputDir,
     [string]$GenerationRoot = "",
     [string]$AssetVersion = "",
@@ -316,8 +321,21 @@ if (-not (Test-Path -LiteralPath $CompatRoot -PathType Container)) {
 }
 
 # Résout les chemins dans le répertoire de l'appelant avant de changer de répertoire de travail.
+if (-not [string]::IsNullOrWhiteSpace($InputPath) -and @($InputPaths).Count -gt 0) {
+    throw "Utilisez -InputPath pour une image ou -InputPaths pour plusieurs images, pas les deux."
+}
 if (-not [string]::IsNullOrWhiteSpace($InputPath)) {
     $InputPath = Resolve-AssetFactoryPath -Path $InputPath
+}
+if (@($InputPaths).Count -gt 0) {
+    $resolvedInputPaths = @()
+    foreach ($candidate in @($InputPaths)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            throw "InputPaths contient un chemin vide."
+        }
+        $resolvedInputPaths += Resolve-AssetFactoryPath -Path $candidate
+    }
+    $InputPaths = @($resolvedInputPaths)
 }
 if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Resolve-AssetFactoryPath -Path $OutputDir
@@ -399,18 +417,28 @@ try {
         return
     }
 
-    if ([string]::IsNullOrWhiteSpace($InputPath)) {
-        throw "-InputPath is required unless -SelfTest or -CheckModels is used."
+    $resolvedInputs = @()
+    if (@($InputPaths).Count -gt 0) {
+        $resolvedInputs = @($InputPaths)
+    } elseif (-not [string]::IsNullOrWhiteSpace($InputPath)) {
+        $resolvedInputs = @($InputPath)
     }
-
-    $resolvedInput = Resolve-AssetFactoryPath -Path $InputPath
-    if (-not (Test-Path -LiteralPath $resolvedInput -PathType Leaf)) {
-        throw "Input image does not exist: $resolvedInput"
+    if ($resolvedInputs.Count -eq 0) {
+        throw "-InputPath ou -InputPaths est requis sauf avec -SelfTest ou -CheckModels."
     }
+    foreach ($resolvedInput in $resolvedInputs) {
+        if (-not (Test-Path -LiteralPath $resolvedInput -PathType Leaf)) {
+            throw "Image d'entrée introuvable : $resolvedInput"
+        }
+        if ([System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant() -notin @(".png", ".jpg", ".jpeg", ".webp")) {
+            throw "Les entrées TRELLIS doivent être des images PNG, JPEG ou WebP : $resolvedInput"
+        }
+    }
+    $isMultiImage = $resolvedInputs.Count -gt 1
 
     $effectiveAssetId = $AssetId
     if ([string]::IsNullOrWhiteSpace($effectiveAssetId)) {
-        $effectiveAssetId = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInput)
+        $effectiveAssetId = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInputs[0])
     }
     Assert-AFFileStem -Name $effectiveAssetId
 
@@ -424,25 +452,50 @@ try {
             -GenerationRoot $GenerationRoot `
             -Version $AssetVersion
         $resolvedOutput = $layout.RawDir
-        $extension = [System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant()
-        $storedInput = Join-Path $layout.SourceDir ($effectiveAssetId + $extension)
-        if ([System.IO.Path]::GetFullPath($resolvedInput) -ne [System.IO.Path]::GetFullPath($storedInput)) {
-            if (Test-Path -LiteralPath $storedInput) {
-                throw "Generation source image already exists; refusing to overwrite it: $storedInput"
+        if ($isMultiImage) {
+            # Dans un pipeline multi-vues, les images sont déjà versionnées sous source/views.
+            # Un lancement TRELLIS direct conserve en revanche une copie des entrées dans sa génération.
+            if ($OwnsGeneration) {
+                $trellisInputsDir = Join-Path $layout.SourceDir "trellis-inputs"
+                New-Item -ItemType Directory -Path $trellisInputsDir -Force | Out-Null
+                $storedInputs = @()
+                for ($index = 0; $index -lt $resolvedInputs.Count; $index++) {
+                    $source = $resolvedInputs[$index]
+                    $extension = [System.IO.Path]::GetExtension($source).ToLowerInvariant()
+                    $stored = Join-Path $trellisInputsDir ("{0}_view_{1:D2}{2}" -f $effectiveAssetId, ($index + 1), $extension)
+                    if (Test-Path -LiteralPath $stored) {
+                        throw "Une entrée TRELLIS existe déjà dans la génération : $stored"
+                    }
+                    Copy-Item -LiteralPath $source -Destination $stored
+                    $storedInputs += $stored
+                }
+                $resolvedInputs = @($storedInputs)
             }
-            Copy-Item -LiteralPath $resolvedInput -Destination $storedInput
+        } else {
+            $resolvedInput = $resolvedInputs[0]
+            $extension = [System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant()
+            $storedInput = Join-Path $layout.SourceDir ($effectiveAssetId + $extension)
+            if ([System.IO.Path]::GetFullPath($resolvedInput) -ne [System.IO.Path]::GetFullPath($storedInput)) {
+                if (Test-Path -LiteralPath $storedInput) {
+                    throw "L'image source de la génération existe déjà ; refus de l'écraser : $storedInput"
+                }
+                Copy-Item -LiteralPath $resolvedInput -Destination $storedInput
+            }
+            $resolvedInputs = @($storedInput)
         }
-        $resolvedInput = $storedInput
         $metadataPath = Join-Path $layout.MetadataDir "trellis.json"
         $metadata = [ordered]@{
-            schemaVersion = 3
+            schemaVersion = 4
             assetId = $effectiveAssetId
             assetVersion = $layout.Version
             generationRoot = $layout.Root
             createdAt = (Get-Date).ToString("o")
             completedAt = $null
             status = "running"
-            inputPath = $resolvedInput
+            inputMode = $(if ($isMultiImage) { "multi-image" } else { "single-image" })
+            inputPath = $(if ($isMultiImage) { $null } else { $resolvedInputs[0] })
+            inputPaths = @($resolvedInputs)
+            multiImageMode = $(if ($isMultiImage) { $MultiImageMode } else { $null })
             glbPath = $null
             plyPath = $null
             seed = $Seed
@@ -464,7 +517,8 @@ try {
                 createdAt = $metadata.createdAt
                 completedAt = $null
                 status = "running"
-                imagePath = $resolvedInput
+                imagePath = $(if ($isMultiImage) { $null } else { $resolvedInputs[0] })
+                inputPaths = @($resolvedInputs)
                 rawModelPath = $null
                 metadataPath = $metadataPath
                 unreal = [ordered]@{ status = "pending"; assetVersion = $null; destinationPath = $null }
@@ -479,7 +533,7 @@ try {
     }
 
     New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
-    $assetName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedInput)
+    $assetName = $(if ($isMultiImage) { $effectiveAssetId } else { [System.IO.Path]::GetFileNameWithoutExtension($resolvedInputs[0]) })
     $expectedGlb = Join-Path $resolvedOutput ($assetName + ".glb")
     if (Test-Path -LiteralPath $expectedGlb) {
         throw "TRELLIS output already exists; refusing to overwrite it: $expectedGlb"
@@ -490,10 +544,15 @@ try {
             throw "TRELLIS PLY output already exists; refusing to overwrite it: $expectedPly"
         }
     }
-    $unrealConfig = Resolve-UnrealImportConfiguration -ResolvedInput $resolvedInput
+    $unrealConfig = Resolve-UnrealImportConfiguration -ResolvedInput $resolvedInputs[0]
 
     Write-Host "[INFO] Exécution de TRELLIS via l’adaptateur SDPA Asset Factory..."
-    Write-Host "[INFO] Entrée : $resolvedInput"
+    if ($isMultiImage) {
+        Write-Host "[INFO] Entrées multi-vues : $($resolvedInputs.Count) images"
+        Write-Host "[INFO] Fusion TRELLIS : $MultiImageMode"
+    } else {
+        Write-Host "[INFO] Entrée : $($resolvedInputs[0])"
+    }
     Write-Host "[INFO] Sortie : $resolvedOutput"
     if ($null -ne $layout) { Write-Host "[INFO] Génération : $($layout.Root)" }
     Write-Host "[INFO] Modèles : $ModelsDir (mode hors ligne)"
@@ -509,12 +568,18 @@ try {
         "-B", "-s", "-u",
         $Adapter,
         "--models-dir", $ModelsDir,
-        "--input", $resolvedInput,
         "--output-dir", $resolvedOutput,
         "--seed", $Seed.ToString(),
         "--simplify", $Simplify.ToString([System.Globalization.CultureInfo]::InvariantCulture),
-        "--texture-size", $TextureSize.ToString()
+        "--texture-size", $TextureSize.ToString(),
+        "--multi-image-mode", $MultiImageMode
     )
+    if ($isMultiImage) {
+        $arguments += @("--asset-id", $effectiveAssetId)
+    }
+    foreach ($resolvedInput in $resolvedInputs) {
+        $arguments += @("--input", $resolvedInput)
+    }
     if ($SavePly) {
         $arguments += "--save-ply"
     }
