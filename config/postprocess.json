@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "cameraMatch": {
+    "searchResolution": 128,
+    "coarseAzimuthStep": 30,
+    "coarseElevations": [-20, 5, 25],
+    "coarseLens": 50,
+    "refineAzimuthOffsets": [-15, -7.5, 0, 7.5, 15],
+    "refineElevationOffsets": [-10, -5, 0, 5, 10],
+    "refineLenses": [35, 50, 70],
+    "refineRollOffsets": [-5, 0, 5]
+  },
+  "referenceMask": {
+    "deltaEThreshold": 18,
+    "morphologySize": 5,
+    "minCoverage": 0.04,
+    "maxCoverage": 0.92
+  },
+  "qa": {
+    "renderSize": 512,
+    "edgeThreshold": 28,
+    "edgeTolerancePixels": 3,
+    "edgeBoundaryIgnorePixels": 4,
+    "colorDeltaEThreshold": 18,
+    "colorLightnessWeight": 0.25,
+    "colorEdgeIgnorePixels": 3,
+    "minAnomalyAreaFraction": 0.0015,
+    "maxAnomalies": 40
+  },
+  "scoring": {
+    "silhouetteWeight": 0.5,
+    "edgeWeight": 0.3,
+    "colorWeight": 0.2,
+    "colorDeltaEReference": 35
+  }
+}

@@ -15,6 +15,8 @@ param(
     [string]$Preset = "",
     [string[]]$Exclude = @(),
     [string]$MultiviewMethod = "none",
+    [ValidateSet("none", "qa")]
+    [string]$Postprocess = "none",
 
     [ValidateRange(0.001, 1000000.0)]
     [double]$TargetHeight = 1.0,
@@ -122,6 +124,9 @@ try {
         $exclude = @(Get-BatchSetting $Asset $Batch "exclude" "Exclude" @())
         $multiviewMethod = [string](Get-BatchSetting $Asset $Batch "multiviewMethod" "MultiviewMethod" "none")
         if ([string]::IsNullOrWhiteSpace($multiviewMethod)) { $multiviewMethod = "none" }
+        $postprocess = [string](Get-BatchSetting $Asset $Batch "postprocess" "Postprocess" "none")
+        $postprocess = $postprocess.ToLowerInvariant()
+        if ($postprocess -notin @("none", "qa")) { throw "Asset '$id': postprocess must be 'none' or 'qa'." }
 
         $profile = [string](Get-BatchSetting $Asset $Batch "projectProfile" "ProjectProfile" "")
         $categoryValue = [string](Get-BatchSetting $Asset $Batch "category" "Category" "")
@@ -155,6 +160,7 @@ try {
             preset = $preset
             exclude = @($exclude)
             multiviewMethod = $multiviewMethod
+            postprocess = $postprocess
             engine = $assetEngine
             targetHeight = [double]$height
             projectProfile = $profile
@@ -174,6 +180,8 @@ try {
             meshPath = $null
             sourceFormat = $null
             unrealStatus = $null
+            postprocessStatus = $null
+            postprocessReportPath = $null
             unrealVersion = $null
             importedObjectPaths = @()
             failedStage = $null
@@ -248,6 +256,7 @@ try {
                 Seed = $ActiveRecord.seed
                 GeometryMethod = $ActiveRecord.engine
                 MultiviewMethod = $ActiveRecord.multiviewMethod
+                Postprocess = $ActiveRecord.postprocess
                 TargetHeight = $ActiveRecord.targetHeight
                 ProjectProfile = $ActiveRecord.projectProfile
                 Category = $ActiveRecord.category
@@ -285,6 +294,8 @@ try {
                 $ActiveRecord.generationMetadataPath = $summary.metadataPath
                 $ActiveRecord.imagePath = $summary.imagePath
                 $ActiveRecord.meshPath = $summary.meshPath
+                $ActiveRecord.postprocessStatus = $summary.postprocessStatus
+                $ActiveRecord.postprocessReportPath = $summary.postprocessReportPath
                 $ActiveRecord.failedStage = $summary.failedStage
             }
 

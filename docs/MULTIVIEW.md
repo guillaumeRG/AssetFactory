@@ -1,4 +1,4 @@
-# Multi-vues
+﻿# Multi-vues
 
 Le multi-vues est une **étape optionnelle** de la transformation image -> asset 3D.
 
@@ -47,6 +47,7 @@ image sélectionnée
   -> scoring / sélection des vues
   -> TRELLIS run_multi_image()
   -> Blender
+  -> Visual QA optionnel
   -> Unreal optionnel
 ```
 

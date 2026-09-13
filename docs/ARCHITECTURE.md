@@ -1,4 +1,4 @@
-# Architecture Asset Factory
+﻿# Architecture Asset Factory
 
 ## Principe
 
@@ -43,6 +43,7 @@ image
   -> multi-vues optionnel
   -> geometry method
   -> Blender
+  -> post-process optionnel
   -> Unreal optionnel
 ```
 
@@ -101,7 +102,14 @@ orchestration partagée
        +--> multiview runner (optionnel)
        +--> geometry runner
        +--> Blender
+       +--> post-process (optionnel)
        +--> Unreal (optionnel)
 ```
 
 Aucune brique 3D ne doit réimplémenter la génération ou la sélection de l'image de référence.
+
+## Post-process
+
+Le post-process est une étape interne commune aux pipelines direct et multi-vues. `Invoke-AFVisualQA` centralise l'orchestration ; les calculs d'image et les opérations Blender restent séparés dans `tools/internal/postprocess/`.
+
+Le mode public actuel est `-Postprocess qa`. Il analyse la référence et le mesh final sans modifier `raw/` ni `final/`. Voir [`VISUAL_QA.md`](VISUAL_QA.md).

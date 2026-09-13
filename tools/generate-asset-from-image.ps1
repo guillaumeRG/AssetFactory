@@ -33,6 +33,8 @@ param(
     [System.Nullable[int]]$MaxViews = $null,
     [System.Nullable[double]]$MinViewScore = $null,
 
+    [ValidateSet("none", "qa")]
+    [string]$Postprocess = "none",
     [string]$BlenderPath = ""
 )
 
@@ -74,6 +76,7 @@ try {
         -ViewPolicy $ViewPolicy `
         -MaxViews $MaxViews `
         -MinViewScore $MinViewScore `
+        -Postprocess $Postprocess `
         -BlenderPath $BlenderPath
 
     Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))

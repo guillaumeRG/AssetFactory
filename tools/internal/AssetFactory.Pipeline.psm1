@@ -1,4 +1,4 @@
-# Orchestration partagee des points d'entree publics Asset Factory.
+﻿# Orchestration partagee des points d'entree publics Asset Factory.
 # Ce module ne modifie jamais le code des moteurs sous engines/.
 
 Set-StrictMode -Version Latest
@@ -267,6 +267,116 @@ function Invoke-AFImageStage {
     }
 }
 
+
+function Invoke-AFVisualQA {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ReferencePath,
+        [Parameter(Mandatory = $true)][string]$MeshPath,
+        [Parameter(Mandatory = $true)][string]$GenerationRoot,
+        [Parameter(Mandatory = $true)][string]$BlenderExecutable,
+        [ValidateSet("qa")][string]$Mode = "qa"
+    )
+
+    $layout = Get-AFGenerationLayout -GenerationRoot $GenerationRoot
+    $qaRoot = Join-Path $layout.Root "qa"
+    $qaReferenceDir = Join-Path $qaRoot "reference"
+    $qaRendersDir = Join-Path $qaRoot "renders"
+    $qaMapsDir = Join-Path $qaRoot "maps"
+    foreach ($directory in @($qaRoot, $qaReferenceDir, $qaRendersDir, $qaMapsDir)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    $configPath = Join-Path $script:AssetFactoryRoot "config\postprocess.json"
+    $qaCore = Join-Path $script:ToolsRoot "internal\postprocess\qa_core.py"
+    $blenderQa = Join-Path $script:ToolsRoot "internal\postprocess\blender_qa.py"
+    Assert-AFFile -Path $ReferencePath -Label "Reference Visual QA"
+    Assert-AFFile -Path $MeshPath -Label "Mesh Visual QA"
+    Assert-AFFile -Path $BlenderExecutable -Label "Blender Visual QA"
+    Assert-AFFile -Path $configPath -Label "Configuration Visual QA"
+    Assert-AFFile -Path $qaCore -Label "Analyse Visual QA"
+    Assert-AFFile -Path $blenderQa -Label "Rendu Blender Visual QA"
+
+    $config = Read-AFJsonFile -Path $configPath -Label "Configuration Visual QA"
+    if ([int](Get-AFProperty $config "schemaVersion" 0) -ne 1) {
+        throw "Version de configuration Visual QA non prise en charge."
+    }
+
+    $python = Resolve-AFImageQualityPython
+    $referenceLog = Join-Path $layout.LogsDir "visual-qa-reference.log"
+    $prepareResult = Invoke-AFCommand -Executable $python -LogPath $referenceLog -Arguments @(
+        "-B", $qaCore, "prepare-reference",
+        "--reference", $ReferencePath,
+        "--output-dir", $qaReferenceDir,
+        "--config", $configPath
+    )
+    if ($prepareResult.ExitCode -ne 0) {
+        throw "La preparation de la reference Visual QA a echoue. Log : $referenceLog"
+    }
+
+    $referenceMask = Join-Path $qaReferenceDir "reference-mask.png"
+    $referenceSearchMask = Join-Path $qaReferenceDir "reference-mask-search.png"
+    Assert-AFFile -Path $referenceMask -Label "Masque Visual QA"
+    Assert-AFFile -Path $referenceSearchMask -Label "Masque de recherche camera Visual QA"
+
+    $cameraPath = Join-Path $qaRoot "camera.json"
+    $blenderLog = Join-Path $layout.LogsDir "visual-qa-blender.log"
+    $blenderResult = Invoke-AFCommand -Executable $BlenderExecutable -LogPath $blenderLog -Arguments @(
+        "--background", "--factory-startup", "--python-exit-code", "1",
+        "--python", $blenderQa, "--",
+        "--mesh", $MeshPath,
+        "--reference-mask", $referenceSearchMask,
+        "--output-dir", $qaRendersDir,
+        "--camera-output", $cameraPath,
+        "--config", $configPath
+    )
+    if ($blenderResult.ExitCode -ne 0) {
+        throw "Le rendu Blender Visual QA a echoue. Log : $blenderLog"
+    }
+    Assert-AFFile -Path $cameraPath -Label "Camera Visual QA"
+
+    $beautyPath = Join-Path $qaRendersDir "beauty.png"
+    $silhouettePath = Join-Path $qaRendersDir "silhouette.png"
+    $clayPath = Join-Path $qaRendersDir "clay.png"
+    $albedoPath = Join-Path $qaRendersDir "albedo.png"
+    foreach ($path in @($beautyPath, $silhouettePath, $clayPath, $albedoPath)) {
+        Assert-AFFile -Path $path -Label "Passe Visual QA"
+    }
+
+    $reportPath = Join-Path $qaRoot "qa-report.json"
+    $analysisLog = Join-Path $layout.LogsDir "visual-qa-analysis.log"
+    $analysisResult = Invoke-AFCommand -Executable $python -LogPath $analysisLog -Arguments @(
+        "-B", $qaCore, "analyze",
+        "--reference", $ReferencePath,
+        "--reference-mask", $referenceMask,
+        "--beauty", $beautyPath,
+        "--silhouette", $silhouettePath,
+        "--clay", $clayPath,
+        "--albedo", $albedoPath,
+        "--camera", $cameraPath,
+        "--output-dir", $qaMapsDir,
+        "--report", $reportPath,
+        "--config", $configPath
+    )
+    if ($analysisResult.ExitCode -ne 0) {
+        throw "L'analyse Visual QA a echoue. Log : $analysisLog"
+    }
+    Assert-AFFile -Path $reportPath -Label "Rapport Visual QA"
+
+    $report = Read-AFJsonFile -Path $reportPath -Label "Rapport Visual QA"
+    $metrics = Get-AFProperty $report "metrics" $null
+    return [pscustomobject]@{
+        Mode = $Mode
+        Status = [string](Get-AFProperty $report "status" "completed")
+        Root = $qaRoot
+        ReportPath = $reportPath
+        AnomalyMapPath = Join-Path $qaMapsDir "anomaly-map.png"
+        CameraPath = $cameraPath
+        OverallScore = Get-AFProperty $metrics "overallScore" $null
+        Warnings = @(Get-AFProperty $report "warnings" @())
+    }
+}
+
 function Invoke-AFAssetPipeline {
     [CmdletBinding()]
     param(
@@ -297,7 +407,8 @@ function Invoke-AFAssetPipeline {
         [System.Nullable[bool]]$IncludeReference = $null,
         [string]$ViewPolicy = "",
         [System.Nullable[int]]$MaxViews = $null,
-        [System.Nullable[double]]$MinViewScore = $null
+        [System.Nullable[double]]$MinViewScore = $null,
+        [ValidateSet("none", "qa")][string]$Postprocess = "none"
     )
 
     if ($MultiviewMethod -ne "none" -and $GeometryMethod -ne "trellis") {
@@ -324,6 +435,7 @@ function Invoke-AFAssetPipeline {
         ReleaseComfyMemory = $ReleaseComfyMemory
         TrellisSimplify = $TrellisSimplify
         TrellisTextureSize = $TrellisTextureSize
+        Postprocess = $Postprocess
     }
     if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) { $parameters.BlenderPath = $BlenderPath }
     if ($null -ne $AutoImport) { $parameters.AutoImport = [bool]$AutoImport }
@@ -359,4 +471,4 @@ function Invoke-AFAssetPipeline {
     return ($json | ConvertFrom-Json)
 }
 
-Export-ModuleMember -Function Invoke-AFImageStage, Invoke-AFAssetPipeline
+Export-ModuleMember -Function Invoke-AFImageStage, Invoke-AFAssetPipeline, Invoke-AFVisualQA

@@ -22,7 +22,9 @@ param(
     [string]$ProjectProfile = "",
     [string]$Category = "",
     [System.Nullable[bool]]$AutoImport = $null,
-    [string]$BlenderPath = ""
+    [string]$BlenderPath = "",
+    [ValidateSet("none", "qa")]
+    [string]$Postprocess = "none"
 )
 
 Set-StrictMode -Version Latest
@@ -30,6 +32,7 @@ $ErrorActionPreference = "Stop"
 
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot "pipeline-common.ps1")
+Import-Module (Join-Path $PSScriptRoot "internal\AssetFactory.Pipeline.psm1") -Force
 
 $RegistryPath = Join-Path $AssetFactoryRoot "config\geometry-methods.json"
 $BlenderScript = Join-Path $AssetFactoryRoot "blender\scripts\process-mesh.py"
@@ -287,12 +290,13 @@ try {
     }
     if ($selectedViews.Count -lt 2) { throw "La politique de sélection n'a conservé que $($selectedViews.Count) vue(s)." }
 
+    $referencePath = [string](Get-AFProperty $MultiViewMetadata "referencePath" "")
+    if ([string]::IsNullOrWhiteSpace($referencePath)) { throw "Chemin de référence absent des métadonnées multi-vues." }
+    Assert-AFFile -Path $referencePath -Label "Image de référence"
+
     $inputPaths = @()
     $inputDescriptors = @()
     if ($resolvedIncludeReference) {
-        $referencePath = [string](Get-AFProperty $MultiViewMetadata "referencePath" "")
-        if ([string]::IsNullOrWhiteSpace($referencePath)) { throw "Chemin de référence absent des métadonnées multi-vues." }
-        Assert-AFFile -Path $referencePath -Label "Image de référence"
         $inputPaths += $referencePath
         $inputDescriptors += [ordered]@{ kind = "reference"; index = 0; path = $referencePath }
     }
@@ -359,6 +363,15 @@ try {
         inputs = $inputDescriptors
         rawModelPath = $null
         finalModelPath = $null
+        postprocess = [ordered]@{
+            mode = $Postprocess
+            status = $(if ($Postprocess -eq "none") { "skipped" } else { "pending" })
+            reportPath = $null
+            anomalyMapPath = $null
+            overallScore = $null
+            warnings = @()
+            error = $null
+        }
         unreal = [ordered]@{
             status = $(if ($UnrealConfig.enabled) { "pending" } else { "not-configured" })
             metadataPath = Join-Path $Layout.MetadataDir "unreal.json"
@@ -373,6 +386,7 @@ try {
     Set-JsonProperty -Object $GenerationMetadata -Name "failedStage" -Value $null
     Set-JsonProperty -Object $GenerationMetadata -Name "error" -Value $null
     Set-JsonProperty -Object $GenerationMetadata -Name "geometryMetadataPath" -Value $GeometryMetadataPath
+    Set-JsonProperty -Object $GenerationMetadata -Name "postprocess" -Value $GeometryMetadata.postprocess
     Save-AFJson -Value $GenerationMetadata -Path $Layout.GenerationMetadataPath
 
     Write-AFInfo "Asset : $AssetId"
@@ -423,6 +437,37 @@ try {
     $GeometryMetadata.finalModelPath = $expectedFinal
     Save-AFJson -Value $GeometryMetadata -Path $GeometryMetadataPath
 
+    $Stage = "postprocess"
+    if ($Postprocess -eq "qa") {
+        $GeometryMetadata.postprocess.status = "running"
+        Set-JsonProperty -Object $GenerationMetadata -Name "postprocess" -Value $GeometryMetadata.postprocess
+        Save-AFJson -Value $GeometryMetadata -Path $GeometryMetadataPath
+        Save-AFJson -Value $GenerationMetadata -Path $Layout.GenerationMetadataPath
+        Write-AFInfo "Visual QA : comparaison de la reference et du modele final..."
+        try {
+            $qaResult = Invoke-AFVisualQA `
+                -ReferencePath $referencePath `
+                -MeshPath $expectedFinal `
+                -GenerationRoot $Layout.Root `
+                -BlenderExecutable $BlenderExe `
+                -Mode qa
+            $GeometryMetadata.postprocess.status = $qaResult.Status
+            $GeometryMetadata.postprocess.reportPath = $qaResult.ReportPath
+            $GeometryMetadata.postprocess.anomalyMapPath = $qaResult.AnomalyMapPath
+            $GeometryMetadata.postprocess.overallScore = $qaResult.OverallScore
+            $GeometryMetadata.postprocess.warnings = @($qaResult.Warnings)
+            Write-AFOk "Visual QA termine : $($qaResult.ReportPath)"
+        }
+        catch {
+            $GeometryMetadata.postprocess.status = "failed"
+            $GeometryMetadata.postprocess.error = $_.Exception.Message
+            Write-AFFail "Visual QA non bloquant : $($_.Exception.Message)"
+        }
+        Set-JsonProperty -Object $GenerationMetadata -Name "postprocess" -Value $GeometryMetadata.postprocess
+        Save-AFJson -Value $GeometryMetadata -Path $GeometryMetadataPath
+        Save-AFJson -Value $GenerationMetadata -Path $Layout.GenerationMetadataPath
+    }
+
     $Stage = "unreal"
     if ($UnrealConfig.autoImport) {
         Write-AFInfo "Import du modèle final dans Unreal Engine..."
@@ -451,6 +496,7 @@ try {
     Set-JsonProperty -Object $GenerationMetadata -Name "completedAt" -Value ((Get-Date).ToString("o"))
     Set-JsonProperty -Object $GenerationMetadata -Name "rawModelPath" -Value $expectedRaw
     Set-JsonProperty -Object $GenerationMetadata -Name "finalModelPath" -Value $expectedFinal
+    Set-JsonProperty -Object $GenerationMetadata -Name "postprocess" -Value $GeometryMetadata.postprocess
     Save-AFJson -Value $GenerationMetadata -Path $Layout.GenerationMetadataPath
 
     Write-AFOk "Reconstruction 3D multi-vues terminée"
@@ -469,6 +515,8 @@ try {
         rawMeshPath = $expectedRaw
         metadataPath = $GeometryMetadataPath
         unrealStatus = $GeometryMetadata.unreal.status
+        postprocessStatus = $GeometryMetadata.postprocess.status
+        postprocessReportPath = $GeometryMetadata.postprocess.reportPath
     }
     Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
     $ExitCode = 0

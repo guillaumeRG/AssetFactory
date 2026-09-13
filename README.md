@@ -222,6 +222,7 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
 -TargetHeight      hauteur finale en mètres
 -ProjectProfile    profil Unreal optionnel
 -AutoImport        import Unreal automatique
+-Postprocess       none ou qa
 ```
 
 Paramètres multi-vues utiles :
@@ -233,6 +234,18 @@ Paramètres multi-vues utiles :
 -MaxViews
 -MinViewScore
 ```
+
+Contrôle qualité visuel optionnel :
+
+```powershell
+.\tools\generate-asset-from-image.ps1 `
+    -InputPath ".\reference.png" `
+    -AssetId "StorageTank_QA_01" `
+    -GeometryMethod trellis `
+    -Postprocess qa
+```
+
+`qa` produit un rapport et des rendus de contrôle sans modifier l'asset.
 
 ---
 

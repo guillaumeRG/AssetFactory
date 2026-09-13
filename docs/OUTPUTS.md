@@ -39,6 +39,12 @@ v001/
 │  ├─ comfyui-workflow.json
 │  ├─ trellis.json
 │  └─ unreal.json
+├─ qa/                       # uniquement avec -Postprocess qa
+│  ├─ reference/
+│  ├─ renders/
+│  ├─ maps/
+│  ├─ camera.json
+│  └─ qa-report.json
 └─ generation.json
 ```
 
@@ -53,6 +59,7 @@ Tous les fichiers ne sont présents que si l'étape correspondante a été exéc
 - `final/` : résultat normalisé par Blender, prêt à être utilisé/importé ;
 - `logs/` : sortie détaillée de chaque étape ;
 - `metadata/` : métadonnées techniques propres aux sous-étapes ;
+- `qa/` : rendus, cartes d'erreur et rapport du Visual QA optionnel ;
 - `generation.json` : résumé de la génération complète.
 
 Les fichiers intermédiaires sont conservés volontairement. Un échec Blender ou Unreal ne force donc pas à recalculer la génération 3D.

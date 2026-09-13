@@ -59,6 +59,8 @@ param(
     [int]$TrellisTextureSize = 1024,
 
     [string]$BlenderPath = "",
+    [ValidateSet("none", "qa")]
+    [string]$Postprocess = "none",
     [string]$OutputDir = ""
 )
 
@@ -203,8 +205,9 @@ function Invoke-AFMultiViewCycle {
     if (-not [string]::IsNullOrWhiteSpace($Category)) { $geometryParameters.Category = $Category }
     if ($null -ne $AutoImport) { $geometryParameters.AutoImport = $AutoImport }
     if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) { $geometryParameters.BlenderPath = $BlenderPath }
+    $geometryParameters.Postprocess = $Postprocess
 
-    Write-AFInfo "Étape 2/2 : TRELLIS multi-image + Blender + Unreal"
+    Write-AFInfo "Étape 2/2 : TRELLIS multi-image + Blender + post-process + Unreal"
     $geometryLog = Join-Path $layout.LogsDir "run-image-to-3d-geometry.log"
     $geometryResult = Invoke-AFCommand -Executable $MultiViewGeometryRunner -Parameters $geometryParameters -LogPath $geometryLog
     Assert-StageSuccess $geometryResult "Reconstruction 3D multi-vues"
@@ -238,6 +241,8 @@ function Invoke-AFMultiViewCycle {
         meshPath = $geometrySummary.meshPath
         metadataPath = $layout.GenerationMetadataPath
         unrealStatus = $geometrySummary.unrealStatus
+        postprocessStatus = $geometrySummary.postprocessStatus
+        postprocessReportPath = $geometrySummary.postprocessReportPath
         failedStage = $null
     }
     Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
@@ -399,6 +404,15 @@ try {
             scaleFactor = $null
             baseZ = $null
             logPath = (Join-Path $Layout.LogsDir "blender.log")
+            error = $null
+        }
+        postprocess = [ordered]@{
+            mode = $Postprocess
+            status = $(if ($Postprocess -eq "none") { "skipped" } else { "pending" })
+            reportPath = $null
+            anomalyMapPath = $null
+            overallScore = $null
+            warnings = @()
             error = $null
         }
         unreal = [ordered]@{
@@ -600,7 +614,35 @@ try {
     $GenerationMetadata.importSourcePath = $ImportSourcePath
     Save-AFJson $GenerationMetadata $GenerationMetadataPath
 
-    # 5. Import Unreal versionné. Une nouvelle génération ne remplace jamais la précédente par défaut.
+    # 5. Controle qualite visuel optionnel. Une erreur QA ne detruit jamais l'asset valide.
+    $Stage = "postprocess"
+    if ($Postprocess -eq "qa") {
+        $GenerationMetadata.postprocess.status = "running"
+        Save-AFJson $GenerationMetadata $GenerationMetadataPath
+        Write-AFInfo "Visual QA : comparaison de la reference et du modele final..."
+        try {
+            $qaResult = Invoke-AFVisualQA `
+                -ReferencePath $ImagePath `
+                -MeshPath $ProcessedMeshPath `
+                -GenerationRoot $Layout.Root `
+                -BlenderExecutable $BlenderExe `
+                -Mode qa
+            $GenerationMetadata.postprocess.status = $qaResult.Status
+            $GenerationMetadata.postprocess.reportPath = $qaResult.ReportPath
+            $GenerationMetadata.postprocess.anomalyMapPath = $qaResult.AnomalyMapPath
+            $GenerationMetadata.postprocess.overallScore = $qaResult.OverallScore
+            $GenerationMetadata.postprocess.warnings = @($qaResult.Warnings)
+            Write-AFOk "Visual QA termine : $($qaResult.ReportPath)"
+        }
+        catch {
+            $GenerationMetadata.postprocess.status = "failed"
+            $GenerationMetadata.postprocess.error = $_.Exception.Message
+            Write-AFFail "Visual QA non bloquant : $($_.Exception.Message)"
+        }
+        Save-AFJson $GenerationMetadata $GenerationMetadataPath
+    }
+
+    # 6. Import Unreal versionné. Une nouvelle génération ne remplace jamais la précédente par défaut.
     $Stage = "unreal"
     $GenerationMetadata.unreal.sourcePath = $ImportSourcePath
     if ($UnrealConfig.autoImport) {
@@ -692,6 +734,8 @@ if ($null -ne $GenerationMetadata) {
         imagePath = $GenerationMetadata.imagePath
         meshPath = $GenerationMetadata.importSourcePath
         metadataPath = $GenerationMetadataPath
+        postprocessStatus = $GenerationMetadata.postprocess.status
+        postprocessReportPath = $GenerationMetadata.postprocess.reportPath
         failedStage = $GenerationMetadata.failedStage
     }
     Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))

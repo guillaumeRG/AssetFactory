@@ -1,4 +1,4 @@
-# Cycle complet de génération
+﻿# Cycle complet de génération
 
 ## Image depuis un prompt
 
@@ -33,6 +33,7 @@ Image
   -> raw/
   -> Blender
   -> final/
+  -> Visual QA optionnel
   -> Unreal optionnel
 ```
 
@@ -81,4 +82,4 @@ Après une génération d'image depuis un prompt, Asset Factory peut demander à
 
 ## Import Unreal
 
-L'import est déclenché uniquement après Blender lorsque `AutoImport` est activé et qu'un profil de destination valide est fourni.
+L'import est déclenché après Blender et après le Visual QA optionnel lorsque `AutoImport` est activé et qu'un profil de destination valide est fourni.
