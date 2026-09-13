@@ -1,551 +1,459 @@
-[CmdletBinding()]
+﻿[CmdletBinding(DefaultParameterSetName = "Prompt")]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = "Prompt")]
     [ValidateNotNullOrEmpty()]
     [string]$Prompt,
 
-    [string]$NegativePrompt = "",
+    [Parameter(Mandatory = $true, ParameterSetName = "Image")]
+    [ValidateNotNullOrEmpty()]
+    [string]$InputPath,
 
+    [string]$NegativePrompt = "",
     [ValidateRange(0, [long]::MaxValue)]
     [long]$Seed = 0,
-
     [ValidateRange(0.001, 1000000.0)]
     [double]$TargetHeight = 1.0,
 
+    [ValidateSet("triposr", "trellis")]
+    [string]$Engine = "triposr",
+
     [string]$ProjectProfile = "",
-
     [string]$AssetId = "",
-
     [string]$Category = "",
+    [System.Nullable[bool]]$AutoImport = $null,
 
-    [System.Nullable[bool]]$AutoImport = $null
+    [string]$WorkflowPath = "workflows\comfyui-flux-schnell-base.json",
+    [string]$ServerUrl = "http://127.0.0.1:8188",
+    [ValidateRange(10, 3600)]
+    [int]$TimeoutSeconds = 300,
+    [bool]$ReleaseComfyMemory = $true,
+
+    [ValidateRange(0.0, 0.99)]
+    [double]$TrellisSimplify = 0.95,
+    [ValidateSet(512, 1024, 2048)]
+    [int]$TrellisTextureSize = 1024,
+
+    [string]$BlenderPath = "",
+    [string]$OutputDir = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$AssetFactoryRoot = [System.IO.Path]::GetFullPath(
-    (Split-Path -Parent $PSScriptRoot)
-)
+$AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot "pipeline-common.ps1")
 
-$ComfyRunner = Join-Path $AssetFactoryRoot "tools\run-comfyui.ps1"
-$TripoRunner = Join-Path $AssetFactoryRoot "tools\run-triposr.ps1"
+$ComfyRunner = Join-Path $PSScriptRoot "run-comfyui.ps1"
+$GeometryRunner = Join-Path $PSScriptRoot "run-$($Engine.ToLowerInvariant()).ps1"
 $BlenderScript = Join-Path $AssetFactoryRoot "blender\scripts\process-mesh.py"
-$UnrealImportRunner = Join-Path $AssetFactoryRoot "tools\import-unreal.ps1"
-
-function Write-Info {
-    param([Parameter(Mandatory = $true)][string]$Message)
-    Write-Host "[INFO] $Message"
-}
-
-function Write-Ok {
-    param([Parameter(Mandatory = $true)][string]$Message)
-    Write-Host "[OK] $Message" -ForegroundColor Green
-}
-
-function Write-Fail {
-    param([Parameter(Mandatory = $true)][string]$Message)
-    Write-Host "[FAIL] $Message" -ForegroundColor Red
-}
-
-function Save-PipelineMetadata {
-    param(
-        [Parameter(Mandatory = $true)]$Metadata,
-        [Parameter(Mandatory = $true)][string]$Path
-    )
-
-    $Metadata |
-        ConvertTo-Json -Depth 20 |
-        Set-Content -LiteralPath $Path -Encoding UTF8
-}
+$UnrealImportRunner = Join-Path $PSScriptRoot "import-unreal.ps1"
+$Engine = $Engine.ToLowerInvariant()
+$UseExistingImage = $PSCmdlet.ParameterSetName -eq "Image"
 
 function Get-BlenderExecutable {
-    $cmd = Get-Command blender.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -ne $cmd -and -not [string]::IsNullOrWhiteSpace($cmd.Path)) {
-        return $cmd.Path
+    if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) {
+        $resolved = Resolve-AFPath -Path $BlenderPath -BasePath $AssetFactoryRoot
+        Assert-AFFile -Path $resolved -Label "Blender executable"
+        return $resolved
     }
-
+    foreach ($name in @("blender.exe", "blender")) {
+        $command = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $command) {
+            return $command.Path
+        }
+    }
     $patterns = @()
-
     if ($env:ProgramFiles) {
         $patterns += (Join-Path $env:ProgramFiles "Blender Foundation\Blender*\blender.exe")
     }
-
     if ($env:LOCALAPPDATA) {
         $patterns += (Join-Path $env:LOCALAPPDATA "Programs\Blender Foundation\Blender*\blender.exe")
     }
-
-    $matches = @()
-
+    $candidates = @()
     foreach ($pattern in $patterns) {
-        $matches += Get-Item -Path $pattern -ErrorAction SilentlyContinue
+        $candidates += Get-Item -Path $pattern -ErrorAction SilentlyContinue
     }
-
-    $match = $matches |
-        Sort-Object { [System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName).FileVersion } -Descending |
-        Select-Object -First 1
-
-    if ($null -ne $match) {
-        return $match.FullName
+    $candidate = $candidates | Sort-Object {
+        [System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName).FileVersion
+    } -Descending | Select-Object -First 1
+    if ($null -ne $candidate) {
+        return $candidate.FullName
     }
-
-    return $null
+    throw "Blender executable not found. Use -BlenderPath or install Blender."
 }
 
-function Resolve-AssetFactoryPath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if ([System.IO.Path]::IsPathRooted($Path)) {
-        return [System.IO.Path]::GetFullPath($Path)
+function Assert-StageSuccess {
+    param($Result, [string]$StageName)
+    if ($Result.ExitCode -ne 0) {
+        throw "$StageName failed with exit code $($Result.ExitCode). Log: $($Result.LogPath)"
     }
-
-    return [System.IO.Path]::GetFullPath((Join-Path $AssetFactoryRoot $Path))
 }
 
-function Resolve-UnrealImportConfiguration {
-    $result = [ordered]@{
-        enabled = $false
-        profilePath = $null
-        autoImport = $false
-        assetId = $AssetId
-        category = $Category
+$PipelineMetadata = $null
+$PipelineMetadataPath = $null
+$PipelineLock = $null
+$Stage = $null
+$ExitCode = 1
+
+try {
+    # Validate prerequisites before submitting an image or starting a GPU model.
+    Assert-AFFile -Path $GeometryRunner -Label "$Engine runner"
+    Assert-AFFile -Path $BlenderScript -Label "Blender processing script"
+    $BlenderExe = Get-BlenderExecutable
+    $SourceImage = $null
+    if ($UseExistingImage) {
+        $SourceImage = Resolve-AFPath -Path $InputPath -BasePath (Get-Location).Path
+        Assert-AFFile -Path $SourceImage -Label "Input image"
+        if ([System.IO.Path]::GetExtension($SourceImage).ToLowerInvariant() -notin @(".png", ".jpg", ".jpeg", ".webp")) {
+            throw "InputPath must be a PNG, JPEG or WebP image."
+        }
+    } else {
+        Assert-AFFile -Path $ComfyRunner -Label "ComfyUI runner"
+        Assert-AFFile -Path (Resolve-AFPath $WorkflowPath $AssetFactoryRoot) -Label "ComfyUI workflow"
     }
 
-    if ([string]::IsNullOrWhiteSpace($ProjectProfile)) {
-        return $result
+    $PipelineId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    if ([string]::IsNullOrWhiteSpace($AssetId)) {
+        $AssetId = if ($UseExistingImage) {
+            [System.IO.Path]::GetFileNameWithoutExtension($SourceImage)
+        } else {
+            "asset_$PipelineId"
+        }
     }
+    Assert-AFFileStem -Name $AssetId
+    $UnrealConfig = Resolve-AFUnrealConfiguration `
+        -Root $AssetFactoryRoot -ProjectProfile $ProjectProfile `
+        -AutoImport $AutoImport -AssetId $AssetId -Category $Category
 
-    $resolvedProfile = Resolve-AssetFactoryPath -Path $ProjectProfile
-    if (-not (Test-Path -LiteralPath $resolvedProfile -PathType Leaf)) {
-        throw "Project profile not found: $resolvedProfile"
-    }
-
+    # A second full pipeline must not start another GPU workload concurrently.
+    $OutputsRoot = Join-Path $AssetFactoryRoot "outputs"
+    New-Item -ItemType Directory -Path $OutputsRoot -Force | Out-Null
     try {
-        $profile = Get-Content -LiteralPath $resolvedProfile -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        throw "Could not read project profile '$resolvedProfile': $($_.Exception.Message)"
-    }
-
-    $profileAutoImport = $false
-    if ($profile.PSObject.Properties.Name -contains "autoImport") {
-        $profileAutoImport = [bool]$profile.autoImport
-    }
-
-    $effectiveAutoImport = $profileAutoImport
-    if ($null -ne $AutoImport) {
-        $effectiveAutoImport = [bool]$AutoImport
+        $PipelineLock = [System.IO.File]::Open(
+            (Join-Path $OutputsRoot ".image-to-3d.lock"),
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    } catch {
+        throw "Another image-to-3D pipeline holds the project lock. Nothing was interrupted."
     }
 
-    $result.enabled = $true
-    $result.profilePath = $resolvedProfile
-    $result.autoImport = $effectiveAutoImport
-
-    if ($effectiveAutoImport -and [string]::IsNullOrWhiteSpace($AssetId)) {
-        throw "AssetId is required when automatic Unreal import is enabled."
+    if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+        $PipelineRoot = Join-Path $OutputsRoot "pipelines\$PipelineId"
+    } else {
+        $PipelineRoot = Resolve-AFPath -Path $OutputDir -BasePath $AssetFactoryRoot
     }
-
-    if ($effectiveAutoImport -and -not (Test-Path -LiteralPath $UnrealImportRunner -PathType Leaf)) {
-        throw "Unreal import runner not found: $UnrealImportRunner"
+    if (Test-Path -LiteralPath $PipelineRoot) {
+        throw "Output directory already exists; refusing to reuse old artifacts: $PipelineRoot"
     }
-
-    return $result
-}
-
-$UnrealConfig = Resolve-UnrealImportConfiguration
-
-if (-not (Test-Path -LiteralPath $ComfyRunner -PathType Leaf)) {
-    Write-Fail "ComfyUI runner not found: $ComfyRunner"
-    exit 1
-}
-
-if (-not (Test-Path -LiteralPath $TripoRunner -PathType Leaf)) {
-    Write-Fail "TripoSR runner not found: $TripoRunner"
-    exit 1
-}
-
-if (-not (Test-Path -LiteralPath $BlenderScript -PathType Leaf)) {
-    Write-Fail "Blender processing script not found: $BlenderScript"
-    exit 1
-}
-
-$BlenderExe = Get-BlenderExecutable
-if ([string]::IsNullOrWhiteSpace($BlenderExe)) {
-    Write-Fail "Blender executable not found."
-    exit 1
-}
-
-$PipelineId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-$PipelinesRoot = Join-Path $AssetFactoryRoot "outputs\pipelines"
-$PipelineRoot = Join-Path $PipelinesRoot $PipelineId
-$PipelineProcessedDir = Join-Path $PipelineRoot "processed"
-$PipelineMetadataPath = Join-Path $PipelineRoot "pipeline.json"
-
-New-Item -ItemType Directory -Path $PipelineProcessedDir -Force | Out-Null
-
-$PipelineMetadata = [ordered]@{
-    pipelineId = $PipelineId
-    createdAt = (Get-Date).ToString("o")
-    completedAt = $null
-    status = "running"
-    prompt = $Prompt
-    negativePrompt = $NegativePrompt
-    seed = $Seed
-    targetHeightMeters = $TargetHeight
-    comfyui = [ordered]@{
+    $PipelineProcessedDir = Join-Path $PipelineRoot "processed"
+    $PipelineInputDir = Join-Path $PipelineRoot "input"
+    $PipelineLogsDir = Join-Path $PipelineRoot "logs"
+    foreach ($directory in @($PipelineProcessedDir, $PipelineInputDir, $PipelineLogsDir)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $PipelineMetadataPath = Join-Path $PipelineRoot "pipeline.json"
+    $GeometryStage = [ordered]@{
         status = "pending"
-        jobId = $null
-        imagePath = $null
-        error = $null
-    }
-    triposr = [ordered]@{
-        status = "pending"
+        engine = $Engine
         jobId = $null
         meshPath = $null
+        sourceFormat = $null
+        logPath = $null
         error = $null
     }
-    blender = [ordered]@{
-        status = "pending"
-        inputMeshPath = $null
-        processedMeshPath = $null
-        fbxPath = $null
-        requestedHeightMeters = $TargetHeight
-        finalHeightMeters = $null
-        finalWidthMeters = $null
-        finalDepthMeters = $null
-        scaleFactor = $null
-        baseZ = $null
-        error = $null
-    }
-    unreal = [ordered]@{
-        configured = [bool]$UnrealConfig.enabled
-        profilePath = $UnrealConfig.profilePath
-        autoImport = [bool]$UnrealConfig.autoImport
+    $PipelineMetadata = [ordered]@{
+        schemaVersion = 2
+        pipelineId = $PipelineId
         assetId = $AssetId
-        category = $Category
-        status = if ($UnrealConfig.enabled) { "pending" } else { "not-configured" }
-        importedObjectPaths = @()
+        engine = $Engine
+        createdAt = (Get-Date).ToString("o")
+        completedAt = $null
+        status = "running"
+        failedStage = $null
         error = $null
+        prompt = $Prompt
+        negativePrompt = $NegativePrompt
+        seed = $Seed
+        targetHeightMeters = $TargetHeight
+        inputMode = $(if ($UseExistingImage) { "image" } else { "prompt" })
+        imagePath = $null
+        importSourcePath = $null
+        importSourceFormat = $null
+        trellisSettings = @{
+            simplify = $TrellisSimplify
+            textureSize = $TrellisTextureSize
+        }
+        comfyui = [ordered]@{
+            status = "pending"
+            jobId = $null
+            imagePath = $null
+            sourceImagePath = $null
+            metadataPath = $null
+            logPath = $null
+            error = $null
+        }
+        gpuHandoff = [ordered]@{
+            status = "pending"
+            serverUrl = $ServerUrl
+            reservedBytes = $null
+            error = $null
+        }
+        geometry = $GeometryStage
+        triposr = $(if ($Engine -eq "triposr") { $GeometryStage } else { @{ status = "not-selected" } })
+        trellis = $(if ($Engine -eq "trellis") { $GeometryStage } else { @{ status = "not-selected" } })
+        blender = [ordered]@{
+            status = "pending"
+            inputMeshPath = $null
+            processedMeshPath = $null
+            fbxPath = $null
+            glbPath = $null
+            requestedHeightMeters = $TargetHeight
+            finalHeightMeters = $null
+            finalWidthMeters = $null
+            finalDepthMeters = $null
+            scaleFactor = $null
+            baseZ = $null
+            logPath = $null
+            error = $null
+        }
+        unreal = [ordered]@{
+            configured = $UnrealConfig.enabled
+            profilePath = $UnrealConfig.profilePath
+            autoImport = $UnrealConfig.autoImport
+            assetId = $AssetId
+            category = $Category
+            status = "pending"
+            sourcePath = $null
+            importedObjectPaths = @()
+            metadataPath = $null
+            logPath = $null
+            error = $null
+        }
     }
-}
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
+    Write-AFInfo "Pipeline: $PipelineId / engine: $Engine / asset: $AssetId"
+    Write-AFInfo "Metadata: $PipelineMetadataPath"
 
-Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-Write-Ok "ComfyUI runner found"
-Write-Ok "TripoSR runner found"
-Write-Ok "Blender processing script found"
-Write-Ok "Blender executable found: $BlenderExe"
-Write-Info "PipelineId: $PipelineId"
-Write-Info "Prompt: $Prompt"
-Write-Info "Seed: $Seed"
-Write-Info "Target height: $TargetHeight m"
-if ($UnrealConfig.enabled) {
-    Write-Info "Project profile: $($UnrealConfig.profilePath)"
-    Write-Info "Automatic Unreal import: $($UnrealConfig.autoImport)"
-}
-Write-Info "Generating source image with ComfyUI..."
-
-$PipelineMetadata.comfyui.status = "running"
-Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-try {
-    $ComfyOutput = & $ComfyRunner `
-        -Prompt $Prompt `
-        -NegativePrompt $NegativePrompt `
-        -Seed $Seed 6>&1 2>&1
-
-    $ComfyExitCode = $LASTEXITCODE
-
-    foreach ($line in $ComfyOutput) {
-        Write-Host $line
+    # 1. Acquire an image, then copy it under the asset's stable name.
+    $Stage = "comfyui"
+    if (-not $UseExistingImage) {
+        $PipelineMetadata.comfyui.status = "running"
+        Save-AFJson $PipelineMetadata $PipelineMetadataPath
+        $comfyLog = Join-Path $PipelineLogsDir "comfyui.log"
+        $PipelineMetadata.comfyui.logPath = $comfyLog
+        $comfyResult = Invoke-AFCommand -Executable $ComfyRunner -LogPath $comfyLog -Parameters @{
+            Prompt = $Prompt
+            NegativePrompt = $NegativePrompt
+            Seed = $Seed
+            WorkflowPath = $WorkflowPath
+            ServerUrl = $ServerUrl
+            TimeoutSeconds = $TimeoutSeconds
+        }
+        Assert-StageSuccess $comfyResult "ComfyUI"
+        $SourceImage = Get-AFOutputValue $comfyResult.Output "[OK] Image: "
+        $PipelineMetadata.comfyui.jobId = Get-AFOutputValue $comfyResult.Output "[OK] Job: "
+        $PipelineMetadata.comfyui.metadataPath = Get-AFOutputValue $comfyResult.Output "[OK] Metadata: " -Optional
+        Assert-AFFile -Path $SourceImage -Label "Generated image"
     }
-
-    if ($ComfyExitCode -ne 0) {
-        throw "ComfyUI generation failed with exit code $ComfyExitCode."
-    }
-
-    $ComfyJobLine = $ComfyOutput |
-        Where-Object { $_ -match '^\[OK\] Job: ' } |
-        Select-Object -Last 1
-
-    $ImageLine = $ComfyOutput |
-        Where-Object { $_ -match '^\[OK\] Image: ' } |
-        Select-Object -Last 1
-
-    if (-not $ComfyJobLine) {
-        throw "Could not recover ComfyUI job ID from runner output."
-    }
-
-    if (-not $ImageLine) {
-        throw "Could not recover generated image path from ComfyUI runner."
-    }
-
-    $ComfyJobId = ($ComfyJobLine -replace '^\[OK\] Job:\s*', '').Trim()
-    $ImagePath = ($ImageLine -replace '^\[OK\] Image:\s*', '').Trim()
-
-    if (-not (Test-Path -LiteralPath $ImagePath -PathType Leaf)) {
-        throw "Generated image does not exist: $ImagePath"
-    }
-
-    $PipelineMetadata.comfyui.status = "completed"
-    $PipelineMetadata.comfyui.jobId = $ComfyJobId
+    $imageExtension = [System.IO.Path]::GetExtension($SourceImage).ToLowerInvariant()
+    $ImagePath = Join-Path $PipelineInputDir ($AssetId + $imageExtension)
+    Copy-Item -LiteralPath $SourceImage -Destination $ImagePath
+    Assert-AFFile -Path $ImagePath -Label "Named input image"
+    $PipelineMetadata.imagePath = $ImagePath
     $PipelineMetadata.comfyui.imagePath = $ImagePath
-    $PipelineMetadata.comfyui.error = $null
-    Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
+    $PipelineMetadata.comfyui.sourceImagePath = $SourceImage
+    $PipelineMetadata.comfyui.status = if ($UseExistingImage) { "skipped-existing-image" } else { "completed" }
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
+    Write-AFOk "Image: $ImagePath"
 
-    Write-Ok "Source image ready: $ImagePath"
-}
-catch {
-    $PipelineMetadata.status = "failed"
-    $PipelineMetadata.completedAt = (Get-Date).ToString("o")
-    $PipelineMetadata.comfyui.status = "failed"
-    $PipelineMetadata.comfyui.error = $_.Exception.Message
-    Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-    Write-Fail $_.Exception.Message
-    Write-Fail "Pipeline metadata: $PipelineMetadataPath"
-    exit 1
-}
-
-Write-Info "Generating mesh with TripoSR..."
-
-$PipelineMetadata.triposr.status = "running"
-Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-try {
-    $PreviousErrorActionPreference = $ErrorActionPreference
-
-    try {
-        $ErrorActionPreference = "Continue"
-
-        $TripoOutput = & $TripoRunner `
-            -InputPath $ImagePath 6>&1 2>&1
-
-        $TripoExitCode = $LASTEXITCODE
+    # 2. Release ComfyUI's model memory before either 3D engine starts.
+    $Stage = "gpuHandoff"
+    if (-not $UseExistingImage -and $ReleaseComfyMemory) {
+        $PipelineMetadata.gpuHandoff.status = "running"
+        Save-AFJson $PipelineMetadata $PipelineMetadataPath
+        Write-AFInfo "Requesting ComfyUI model unloading before $Engine..."
+        $release = Request-AFComfyMemoryRelease -ServerUrl $ServerUrl
+        $PipelineMetadata.gpuHandoff.reservedBytes = $release.reservedBytes
+        $PipelineMetadata.gpuHandoff.status = "completed"
+        Write-AFOk $release.message
+    } else {
+        $PipelineMetadata.gpuHandoff.status = "skipped"
     }
-    finally {
-        $ErrorActionPreference = $PreviousErrorActionPreference
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
+
+    # 3. Generate with exactly one selected engine. Never fall back silently.
+    $Stage = "geometry"
+    $GeometryStage.status = "running"
+    $GeometryStage.logPath = Join-Path $PipelineLogsDir "$Engine.log"
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
+    Write-AFInfo "Generating 3D with $Engine..."
+    if ($Engine -eq "trellis") {
+        $rawOutputDir = Join-Path $PipelineRoot "generated\trellis"
+        $geometryResult = Invoke-AFCommand -Executable $GeometryRunner -LogPath $GeometryStage.logPath -Parameters @{
+            InputPath = $ImagePath
+            OutputDir = $rawOutputDir
+            Seed = $Seed
+            Simplify = $TrellisSimplify
+            TextureSize = $TrellisTextureSize
+            AutoImport = $false
+        }
+        Assert-StageSuccess $geometryResult "TRELLIS"
+        $MeshPath = Join-Path $rawOutputDir ($AssetId + ".glb")
+        $GeometryStage.jobId = $PipelineId
+        $GeometryStage.sourceFormat = "glb"
+    } else {
+        $geometryResult = Invoke-AFCommand -Executable $GeometryRunner -LogPath $GeometryStage.logPath -Parameters @{
+            InputPath = $ImagePath
+        }
+        Assert-StageSuccess $geometryResult "TripoSR"
+        $MeshPath = Get-AFOutputValue $geometryResult.Output "[OK] Mesh: "
+        $GeometryStage.jobId = Get-AFOutputValue $geometryResult.Output "[OK] Job: "
+        $GeometryStage.sourceFormat = "obj"
     }
+    Assert-AFFile -Path $MeshPath -Label "Generated 3D model"
+    $GeometryStage.meshPath = $MeshPath
+    $GeometryStage.status = "completed"
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
 
-    foreach ($line in $TripoOutput) {
-        Write-Host $line
+    # 4. Keep textured GLB for TRELLIS; preserve OBJ + FBX for TripoSR.
+    $Stage = "blender"
+    $PipelineMetadata.blender.status = "running"
+    $PipelineMetadata.blender.inputMeshPath = $MeshPath
+    $PipelineMetadata.blender.logPath = Join-Path $PipelineLogsDir "blender.log"
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
+    $heightArgument = $TargetHeight.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $blenderArguments = @(
+        "--background", "--factory-startup", "--python-exit-code", "1",
+        "--python", $BlenderScript, "--", "--input", $MeshPath,
+        "--target-height", $heightArgument
+    )
+    if ($Engine -eq "trellis") {
+        $ProcessedMeshPath = Join-Path $PipelineProcessedDir ($AssetId + ".glb")
+        $ImportSourcePath = $ProcessedMeshPath
+        $blenderArguments += @("--output", $ProcessedMeshPath)
+        $PipelineMetadata.blender.glbPath = $ProcessedMeshPath
+        $PipelineMetadata.importSourceFormat = "glb"
+    } else {
+        $ProcessedMeshPath = Join-Path $PipelineProcessedDir "mesh.obj"
+        $ImportSourcePath = Join-Path $PipelineProcessedDir "mesh.fbx"
+        $blenderArguments += @("--output", $ProcessedMeshPath, "--fbx-output", $ImportSourcePath)
+        $PipelineMetadata.blender.fbxPath = $ImportSourcePath
+        $PipelineMetadata.importSourceFormat = "fbx"
     }
-
-    if ($TripoExitCode -ne 0) {
-        throw "TripoSR generation failed with exit code $TripoExitCode."
-    }
-
-    $TripoJobLine = $TripoOutput |
-        Where-Object { $_ -match '^\[OK\] Job: ' } |
-        Select-Object -Last 1
-
-    $MeshLine = $TripoOutput |
-        Where-Object { $_ -match '^\[OK\] Mesh: ' } |
-        Select-Object -Last 1
-
-    if (-not $TripoJobLine) {
-        throw "Could not recover TripoSR job ID from runner output."
-    }
-
-    if (-not $MeshLine) {
-        throw "Could not recover generated mesh path from TripoSR runner."
-    }
-
-    $TripoJobId = ($TripoJobLine -replace '^\[OK\] Job:\s*', '').Trim()
-    $MeshPath = ($MeshLine -replace '^\[OK\] Mesh:\s*', '').Trim()
-
-    if (-not (Test-Path -LiteralPath $MeshPath -PathType Leaf)) {
-        throw "Generated mesh does not exist: $MeshPath"
-    }
-
-    $PipelineMetadata.triposr.status = "completed"
-    $PipelineMetadata.triposr.jobId = $TripoJobId
-    $PipelineMetadata.triposr.meshPath = $MeshPath
-    $PipelineMetadata.triposr.error = $null
-    Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-}
-catch {
-    $PipelineMetadata.status = "failed"
-    $PipelineMetadata.completedAt = (Get-Date).ToString("o")
-    $PipelineMetadata.triposr.status = "failed"
-    $PipelineMetadata.triposr.error = $_.Exception.Message
-    Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-    Write-Fail $_.Exception.Message
-    Write-Fail "Pipeline metadata: $PipelineMetadataPath"
-    exit 1
-}
-
-Write-Info "Processing mesh with Blender..."
-
-$ProcessedMeshPath = Join-Path $PipelineProcessedDir "mesh.obj"
-$FbxPath = Join-Path $PipelineProcessedDir "mesh.fbx"
-
-$PipelineMetadata.blender.status = "running"
-$PipelineMetadata.blender.inputMeshPath = $MeshPath
-Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-try {
-    $PreviousErrorActionPreference = $ErrorActionPreference
-
-    try {
-        $ErrorActionPreference = "Continue"
-
-        $TargetHeightInvariant = [string]::Format(
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            "{0}",
-            $TargetHeight
-        )
-
-        $BlenderOutput = & $BlenderExe `
-            --background `
-            --factory-startup `
-            --python $BlenderScript `
-            -- `
-            --input $MeshPath `
-            --output $ProcessedMeshPath `
-            --fbx-output $FbxPath `
-            --target-height $TargetHeightInvariant 6>&1 2>&1
-
-        $BlenderExitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $PreviousErrorActionPreference
-    }
-
-    foreach ($line in $BlenderOutput) {
-        Write-Host $line
-    }
-
-    if ($BlenderExitCode -ne 0) {
-        throw "Blender processing failed with exit code $BlenderExitCode."
-    }
-
-    if (-not (Test-Path -LiteralPath $ProcessedMeshPath -PathType Leaf)) {
-        throw "Blender completed but processed OBJ was not created: $ProcessedMeshPath"
-    }
-
-    if (-not (Test-Path -LiteralPath $FbxPath -PathType Leaf)) {
-        throw "Blender completed but FBX was not created: $FbxPath"
-    }
-
-    $ResultLine = $BlenderOutput |
-        Where-Object { $_ -match '^\[RESULT_JSON\]\s+' } |
-        Select-Object -Last 1
-
-    if (-not $ResultLine) {
-        throw "Blender completed but did not return normalization metadata."
-    }
-
-    $ResultJson = ($ResultLine -replace '^\[RESULT_JSON\]\s*', '').Trim()
-    $BlenderResult = $ResultJson | ConvertFrom-Json
-
-    $ProcessedMeshPath = (Resolve-Path -LiteralPath $ProcessedMeshPath).Path
-    $FbxPath = (Resolve-Path -LiteralPath $FbxPath).Path
-
-    $PipelineMetadata.blender.status = "completed"
+    $blenderResult = Invoke-AFCommand -Executable $BlenderExe `
+        -Arguments $blenderArguments -LogPath $PipelineMetadata.blender.logPath
+    Assert-StageSuccess $blenderResult "Blender"
+    Assert-AFFile -Path $ProcessedMeshPath -Label "Normalized model"
+    Assert-AFFile -Path $ImportSourcePath -Label "Unreal import source"
+    $normalizationJson = Get-AFOutputValue $blenderResult.Output "[RESULT_JSON] "
+    $normalization = $normalizationJson | ConvertFrom-Json
     $PipelineMetadata.blender.processedMeshPath = $ProcessedMeshPath
-    $PipelineMetadata.blender.fbxPath = $FbxPath
-    $PipelineMetadata.blender.finalHeightMeters = [double]$BlenderResult.final_height_m
-    $PipelineMetadata.blender.finalWidthMeters = [double]$BlenderResult.final_width_m
-    $PipelineMetadata.blender.finalDepthMeters = [double]$BlenderResult.final_depth_m
-    $PipelineMetadata.blender.scaleFactor = [double]$BlenderResult.scale_factor
-    $PipelineMetadata.blender.baseZ = [double]$BlenderResult.base_z
-    $PipelineMetadata.blender.error = $null
+    $PipelineMetadata.blender.finalHeightMeters = [double]$normalization.final_height_m
+    $PipelineMetadata.blender.finalWidthMeters = [double]$normalization.final_width_m
+    $PipelineMetadata.blender.finalDepthMeters = [double]$normalization.final_depth_m
+    $PipelineMetadata.blender.scaleFactor = [double]$normalization.scale_factor
+    $PipelineMetadata.blender.baseZ = [double]$normalization.base_z
+    $PipelineMetadata.blender.status = "completed"
+    $PipelineMetadata.importSourcePath = $ImportSourcePath
+    Save-AFJson $PipelineMetadata $PipelineMetadataPath
 
+    # 5. Import exactly once, after normalization and after the GPU process exits.
+    $Stage = "unreal"
+    $PipelineMetadata.unreal.sourcePath = $ImportSourcePath
+    if ($UnrealConfig.autoImport) {
+        $PipelineMetadata.unreal.status = "running"
+        $PipelineMetadata.unreal.logPath = Join-Path $PipelineLogsDir "unreal.log"
+        Save-AFJson $PipelineMetadata $PipelineMetadataPath
+        $importResult = Invoke-AFCommand -Executable $UnrealImportRunner `
+            -LogPath $PipelineMetadata.unreal.logPath -Parameters @{
+                ProfilePath = $UnrealConfig.profilePath
+                SourcePath = $ImportSourcePath
+                AssetId = $AssetId
+                Category = $Category
+            }
+        $PipelineMetadata.unreal.metadataPath = Get-AFOutputValue $importResult.Output "[OK] Import metadata: " -Optional
+        if (-not $PipelineMetadata.unreal.metadataPath) {
+            $PipelineMetadata.unreal.metadataPath = Get-AFOutputValue $importResult.Output "[FAIL] Import metadata: " -Optional
+        }
+        Assert-StageSuccess $importResult "Unreal import (generated model is preserved)"
+        $importedPaths = @($importResult.Output | Where-Object { $_.StartsWith("[OK] Unreal asset: ") } | ForEach-Object {
+            $_.Substring("[OK] Unreal asset: ".Length).Trim()
+        })
+        if ($importedPaths.Count -eq 0) {
+            throw "Unreal importer returned success without an imported asset path."
+        }
+        $PipelineMetadata.unreal.importedObjectPaths = $importedPaths
+        $PipelineMetadata.unreal.status = "completed"
+    } else {
+        $PipelineMetadata.unreal.status = if ($UnrealConfig.enabled) { "skipped" } else { "not-configured" }
+    }
     $PipelineMetadata.status = "completed"
-    $PipelineMetadata.completedAt = (Get-Date).ToString("o")
-
-    Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
+    $ExitCode = 0
 }
 catch {
-    $PipelineMetadata.status = "failed"
-    $PipelineMetadata.completedAt = (Get-Date).ToString("o")
-    $PipelineMetadata.blender.status = "failed"
-    $PipelineMetadata.blender.error = $_.Exception.Message
-    Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-    Write-Fail $_.Exception.Message
-    Write-Fail "Pipeline metadata: $PipelineMetadataPath"
-    exit 1
-}
-
-if ($UnrealConfig.enabled) {
-    if ($UnrealConfig.autoImport) {
-        Write-Info "Importing FBX into Unreal..."
-
-        $PipelineMetadata.unreal.status = "running"
-        Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-        try {
-            $previousErrorActionPreference = $ErrorActionPreference
-
-            try {
-                $ErrorActionPreference = "Continue"
-
-                $ImportOutput = & $UnrealImportRunner `
-                    -ProfilePath $UnrealConfig.profilePath `
-                    -FbxPath $FbxPath `
-                    -AssetId $AssetId `
-                    -Category $Category 6>&1 2>&1
-
-                $ImportExitCode = $LASTEXITCODE
-            }
-            finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
-
-            foreach ($line in $ImportOutput) {
-                Write-Host $line
-            }
-
-            if ($ImportExitCode -ne 0) {
-                throw "Unreal import failed with exit code $ImportExitCode."
-            }
-
-            $ImportedPaths = @(
-                $ImportOutput |
-                    Where-Object { $_ -match '^\[OK\] Unreal asset: ' } |
-                    ForEach-Object {
-                        ($_ -replace '^\[OK\] Unreal asset:\s*', '').Trim()
-                    }
-            )
-
-            $PipelineMetadata.unreal.status = "completed"
-            $PipelineMetadata.unreal.importedObjectPaths = $ImportedPaths
-            $PipelineMetadata.unreal.error = $null
-            Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-            Write-Ok "Automatic Unreal import completed"
+    $message = $_.Exception.Message
+    Write-AFFail $message
+    if ($null -ne $PipelineMetadata) {
+        $PipelineMetadata.status = "failed"
+        $PipelineMetadata.failedStage = $Stage
+        $PipelineMetadata.error = $message
+        if ($Stage -and $PipelineMetadata.Contains($Stage)) {
+            $PipelineMetadata[$Stage].status = "failed"
+            $PipelineMetadata[$Stage].error = $message
         }
-        catch {
-            $PipelineMetadata.status = "failed"
+    }
+    $ExitCode = 1
+}
+finally {
+    try {
+        if ($null -ne $PipelineMetadata) {
             $PipelineMetadata.completedAt = (Get-Date).ToString("o")
-            $PipelineMetadata.unreal.status = "failed"
-            $PipelineMetadata.unreal.error = $_.Exception.Message
-            Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-
-            Write-Fail $_.Exception.Message
-            Write-Fail "Pipeline metadata: $PipelineMetadataPath"
-            exit 1
+            Save-AFJson $PipelineMetadata $PipelineMetadataPath
         }
-    }
-    else {
-        $PipelineMetadata.unreal.status = "skipped"
-        Save-PipelineMetadata -Metadata $PipelineMetadata -Path $PipelineMetadataPath
-        Write-Info "Automatic Unreal import disabled. FBX kept for manual import."
+    } finally {
+        if ($null -ne $PipelineLock) {
+            $PipelineLock.Dispose()
+        }
     }
 }
 
-Write-Ok "Image-to-3D pipeline completed"
-Write-Ok "Pipeline: $PipelineId"
-Write-Ok "ComfyUI job: $ComfyJobId"
-Write-Ok "Image: $ImagePath"
-Write-Ok "TripoSR job: $TripoJobId"
-Write-Ok "Mesh: $MeshPath"
-Write-Ok "Processed OBJ: $ProcessedMeshPath"
-Write-Ok "FBX: $FbxPath"
-Write-Ok "Final size: $($PipelineMetadata.blender.finalWidthMeters) x $($PipelineMetadata.blender.finalDepthMeters) x $($PipelineMetadata.blender.finalHeightMeters) m"
-Write-Ok "Metadata: $PipelineMetadataPath"
-
-exit 0
+if ($null -ne $PipelineMetadata) {
+    if ($ExitCode -eq 0) {
+        Write-AFOk "Image-to-3D pipeline completed"
+        Write-AFOk "Pipeline: $PipelineId"
+        Write-AFOk "Engine: $Engine"
+        if ($PipelineMetadata.comfyui.jobId) {
+            Write-AFOk "ComfyUI job: $($PipelineMetadata.comfyui.jobId)"
+        }
+        Write-AFOk "Image: $($PipelineMetadata.imagePath)"
+        Write-AFOk "Mesh: $($PipelineMetadata.geometry.meshPath)"
+        if ($Engine -eq "trellis") {
+            Write-AFOk "GLB: $($PipelineMetadata.blender.glbPath)"
+        } else {
+            Write-AFOk "TripoSR job: $($PipelineMetadata.geometry.jobId)"
+            Write-AFOk "Processed OBJ: $($PipelineMetadata.blender.processedMeshPath)"
+            Write-AFOk "FBX: $($PipelineMetadata.blender.fbxPath)"
+        }
+        Write-AFOk "Final size: $($PipelineMetadata.blender.finalWidthMeters) x $($PipelineMetadata.blender.finalDepthMeters) x $($PipelineMetadata.blender.finalHeightMeters) m"
+        Write-AFOk "Metadata: $PipelineMetadataPath"
+    } else {
+        Write-AFFail "Pipeline metadata: $PipelineMetadataPath"
+        if ($PipelineMetadata.importSourcePath) {
+            Write-AFInfo "Import can be retried without regeneration: $($PipelineMetadata.importSourcePath)"
+        }
+    }
+    $result = [ordered]@{
+        kind = "asset-factory-pipeline"
+        status = $PipelineMetadata.status
+        pipelineId = $PipelineId
+        engine = $Engine
+        imagePath = $PipelineMetadata.imagePath
+        meshPath = $PipelineMetadata.importSourcePath
+        metadataPath = $PipelineMetadataPath
+        failedStage = $PipelineMetadata.failedStage
+    }
+    Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
+}
+exit $ExitCode

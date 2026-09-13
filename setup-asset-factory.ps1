@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet("install", "status", "doctor", "triposr", "comfyui", "trellis", "help")]
@@ -6,7 +6,7 @@ param(
 
     [Parameter(Position = 1)]
     [Alias("TriposrCommand", "ComfyUiCommand", "TrellisCommand")]
-    [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install", "runtime-install", "runtime-status", "runtime-doctor", "native-install", "native-status", "native-doctor")]
+    [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install", "model-status", "runtime-install", "runtime-status", "runtime-doctor", "native-install", "native-status", "native-doctor")]
     [string]$EngineCommand = "status",
 
     [switch]$NoInstall
@@ -15,10 +15,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "0.6.3"
+$ScriptVersion = "0.6.23"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $MinimumPowerShellVersion = [version]"5.1"
 $Script:HadWarnings = $false
+$Script:TrellisVsEnvironmentLoaded = $false
 
 $RequiredDirs = @(
     "orchestrator",
@@ -73,6 +74,20 @@ $TrellisExpectedTorchCuda = "13.0"
 $TrellisAttentionBackend = "sdpa"
 
 
+# AF-08C stage 2 native extension sources. These are kept inside the ignored
+# TRELLIS runtime tree so no third-party source checkout is committed.
+$TrellisNativeExtensionsRoot = Join-Path $TrellisRoot ".asset-factory-extensions"
+$TrellisCummRepoUrl = "https://github.com/FindDefinition/cumm.git"
+$TrellisSpconvRepoUrl = "https://github.com/traveller59/spconv.git"
+$TrellisNvdiffrastRepoUrl = "https://github.com/NVlabs/nvdiffrast.git"
+$TrellisNvdiffrastRef = "253ac4fcea7de5f396371124af597e6cc957bfae"
+$TrellisDiffOctreeRepoUrl = "https://github.com/JeffreyXiang/diffoctreerast.git"
+$TrellisMipSplattingRepoUrl = "https://github.com/autonomousvision/mip-splatting.git"
+$TrellisKaolinRepoUrl = "https://github.com/NVIDIAGameWorks/kaolin.git"
+$TrellisKaolinRef = "v0.18.0"
+
+
+
 # Native TRELLIS CUDA extensions are deliberately not installed in v0.6.1.
 # Upstream's setup.sh does not support the modern Windows/PyTorch/CUDA matrix
 # we are targeting. We validate the runtime foundation first, then add pinned
@@ -91,6 +106,7 @@ $TrellisBasicPackages = @(
     "trimesh",
     "xatlas",
     "pyvista",
+    "open3d",
     "pymeshfix",
     "igraph",
     "transformers",
@@ -310,6 +326,37 @@ function Test-Winget {
 
 function Get-GitInfo {
     $path = Get-ExecutablePath @("git.exe", "git")
+
+    # Native build environment setup can temporarily rewrite PATH. Git for
+    # Windows is normally installed in one of these stable locations, so probe
+    # them directly instead of treating PATH as the only source of truth.
+    if (-not $path) {
+        $candidates = @()
+
+        if ($env:ProgramFiles) {
+            $candidates += (Join-Path $env:ProgramFiles "Git\cmd\git.exe")
+            $candidates += (Join-Path $env:ProgramFiles "Git\bin\git.exe")
+        }
+
+        $programFilesX86 = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::ProgramFilesX86)
+        if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+            $candidates += (Join-Path $programFilesX86 "Git\cmd\git.exe")
+            $candidates += (Join-Path $programFilesX86 "Git\bin\git.exe")
+        }
+
+        if ($env:LOCALAPPDATA) {
+            $candidates += (Join-Path $env:LOCALAPPDATA "Programs\Git\cmd\git.exe")
+            $candidates += (Join-Path $env:LOCALAPPDATA "Programs\Git\bin\git.exe")
+        }
+
+        foreach ($candidate in $candidates) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $path = $candidate
+                break
+            }
+        }
+    }
+
     if (-not $path) {
         return [pscustomobject]@{ Installed = $false; Path = $null; Version = $null }
     }
@@ -1790,7 +1837,7 @@ function Ensure-TrellisPackagingTools {
     )
 
     $result = Invoke-TrellisPython -PythonPath $PythonPath -Arguments @(
-        "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"
+        "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools==80.10.2"
     )
     if ($result.ExitCode -ne 0) {
         throw "Could not prepare $Label packaging tools: $($result.Output -join ' | ')"
@@ -1920,6 +1967,7 @@ modules = [
     "onnxruntime",
     "trimesh",
     "xatlas",
+    "open3d",
     "transformers",
     "huggingface_hub",
     "utils3d",
@@ -2216,6 +2264,1074 @@ int main()
     return $objectPath
 }
 
+
+
+function Import-TrellisVs2022BuildEnvironment {
+    param([Parameter(Mandatory)]$Toolchain)
+
+    if ($Script:TrellisVsEnvironmentLoaded) {
+        Write-Result "OK" "VS2022 Build Tools environment already loaded for this TRELLIS run"
+        return
+    }
+
+    $vcvars = Join-Path $Toolchain.VsRoot "VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf)) {
+        throw "VS2022 x64 developer environment script is missing: $vcvars"
+    }
+
+    $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
+    if (-not (Test-Path -LiteralPath $cmd -PathType Leaf)) {
+        throw "cmd.exe is required to initialize the VS2022 native build environment."
+    }
+
+    $originalPath = $env:Path
+
+    $tempDir = Join-Path $ProjectRoot "outputs\trellis-native-toolchain"
+    if (-not (Test-Path -LiteralPath $tempDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    }
+
+    $wrapper = Join-Path $tempDir "load-vs2022-env.cmd"
+    @"
+@echo off
+call "$vcvars" >nul
+if errorlevel 1 exit /b %errorlevel%
+set
+"@ | Set-Content -LiteralPath $wrapper -Encoding ASCII
+
+    # IMPORTANT:
+    # Executing a .ps1 file shares the parent PowerShell process environment.
+    # Previous bootstrap runs can therefore leave large VS/CUDA variables behind.
+    # Starting vcvars64.bat with the inherited environment is not deterministic
+    # and eventually makes cmd.exe fail with "input line is too long".
+    #
+    # Launch vcvars in a genuinely clean child environment instead. Only the
+    # Windows variables required by cmd/vcvars are passed through.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $cmd
+    $psi.Arguments = "/d /c `"$wrapper`""
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.EnvironmentVariables.Clear()
+
+    $cleanVars = @(
+        "SystemRoot", "WINDIR", "SystemDrive", "ComSpec",
+        "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData",
+        "LOCALAPPDATA", "APPDATA",
+        "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+        "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "NUMBER_OF_PROCESSORS",
+        "OS", "PATHEXT"
+    )
+
+    foreach ($name in $cleanVars) {
+        $value = [System.Environment]::GetEnvironmentVariable($name, "Process")
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $psi.EnvironmentVariables[$name] = $value
+        }
+    }
+
+    $systemPath = @(
+        (Join-Path $env:SystemRoot "System32"),
+        $env:SystemRoot,
+        (Join-Path $env:SystemRoot "System32\Wbem"),
+        (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0")
+    ) -join ";"
+    $psi.EnvironmentVariables["PATH"] = $systemPath
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start clean cmd.exe process for vcvars64.bat."
+        }
+
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+    } finally {
+        if ($process) {
+            $process.Dispose()
+        }
+        if (Test-Path -LiteralPath $wrapper -PathType Leaf) {
+            Remove-Item -LiteralPath $wrapper -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($exitCode -ne 0) {
+        $detail = (($stdout + [Environment]::NewLine + $stderr) -split "`r?`n" |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join " | "
+        throw "Could not initialize VS2022 x64 developer environment: $detail"
+    }
+
+    # Import only the native-build variables we actually need. Importing every
+    # variable emitted by `set` would unnecessarily mutate the caller's shell.
+    $allowed = @(
+        "PATH", "INCLUDE", "LIB", "LIBPATH",
+        "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsRedistDir",
+        "VSINSTALLDIR", "VisualStudioVersion",
+        "WindowsSdkDir", "WindowsSDKVersion", "WindowsSDKLibVersion",
+        "UniversalCRTSdkDir", "UCRTVersion",
+        "FrameworkDir", "FrameworkDir64", "FrameworkVersion", "FrameworkVersion64"
+    )
+
+    foreach ($line in ($stdout -split "`r?`n")) {
+        $separator = $line.IndexOf("=")
+        if ($separator -le 0) {
+            continue
+        }
+
+        $name = $line.Substring(0, $separator)
+        if ($allowed -notcontains $name) {
+            continue
+        }
+
+        $data = $line.Substring($separator + 1)
+        [System.Environment]::SetEnvironmentVariable($name, $data, "Process")
+    }
+
+    # Restore the original caller PATH entries after the VS toolchain entries.
+    # This keeps Git/Python/winget discoverable without allowing an old VS
+    # installation to take precedence over the pinned VS2022 Build Tools.
+    $mergedPathEntries = New-Object System.Collections.Generic.List[string]
+    foreach ($rawPath in @($env:Path, $originalPath)) {
+        if ([string]::IsNullOrWhiteSpace($rawPath)) {
+            continue
+        }
+
+        foreach ($entry in $rawPath.Split(";")) {
+            $trimmed = $entry.Trim()
+            if (-not $trimmed) {
+                continue
+            }
+
+            $duplicate = $false
+            foreach ($known in $mergedPathEntries) {
+                if ([string]::Equals($known, $trimmed, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $duplicate = $true
+                    break
+                }
+            }
+
+            if (-not $duplicate) {
+                $mergedPathEntries.Add($trimmed)
+            }
+        }
+    }
+    $env:Path = $mergedPathEntries -join ";"
+
+    $env:DISTUTILS_USE_SDK = "1"
+    $env:MSSdk = "1"
+    $env:CC = $Toolchain.ClPath
+    $env:CXX = $Toolchain.ClPath
+    $env:CUDAHOSTCXX = $Toolchain.ClPath
+
+    $whereExe = Join-Path $env:SystemRoot "System32\where.exe"
+    if (Test-Path -LiteralPath $whereExe -PathType Leaf) {
+        $clProbe = Invoke-NativeCapture -Executable $whereExe -Arguments @("cl.exe")
+        if ($clProbe.ExitCode -eq 0 -and $clProbe.StdOut.Count -gt 0) {
+            $selectedCl = $clProbe.StdOut[0].ToString().Trim()
+            if (-not [string]::Equals(
+                [System.IO.Path]::GetFullPath($selectedCl),
+                [System.IO.Path]::GetFullPath($Toolchain.ClPath),
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "VS2022 environment initialization selected unexpected cl.exe '$selectedCl'; expected '$($Toolchain.ClPath)'."
+            }
+        }
+    }
+
+    $Script:TrellisVsEnvironmentLoaded = $true
+    Write-Result "OK" "VS2022 Build Tools environment pinned to MSVC $($Toolchain.MsvcToolset) from a clean child environment"
+}
+
+function Set-TrellisNativeBuildEnvironment {
+    $toolchain = Assert-TrellisNativeToolchain
+    Import-TrellisVs2022BuildEnvironment -Toolchain $toolchain
+
+    $cudaBin = Join-Path $toolchain.CudaRoot "bin"
+    $env:CUDA_HOME = $toolchain.CudaRoot
+    $env:CUDA_PATH = $toolchain.CudaRoot
+    $env:CUDACXX = $toolchain.NvccPath
+
+    $pathEntries = @($cudaBin, (Split-Path -Parent $toolchain.ClPath))
+    foreach ($entry in $pathEntries) {
+        if ($env:Path -notlike "*$entry*") {
+            $env:Path = "$entry;$env:Path"
+        }
+    }
+
+    # Blackwell RTX 50 uses compute capability 12.0.
+    $env:TORCH_CUDA_ARCH_LIST = "12.0"
+    $env:CUMM_CUDA_ARCH_LIST = "12.0"
+    $env:SPCONV_ALGO = "native"
+    $env:ATTN_BACKEND = $TrellisAttentionBackend
+    $env:PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
+    $env:MAX_JOBS = "1"
+
+    # Keep the TRELLIS runtime hermetic. On Windows, Python user-site packages
+    # can otherwise shadow the editable cumm/spconv/pccm/ccimport packages in
+    # .venv-runtime and silently reintroduce stale CUDA/C++14 build defaults.
+    $env:PYTHONNOUSERSITE = "1"
+
+    # CUDA 13.4 CCCL rejects MSVC's traditional preprocessor. Force the
+    # standards-conforming preprocessor for all native extension builds.
+    $existingCl = $env:CL
+    if ([string]::IsNullOrWhiteSpace($existingCl)) {
+        $env:CL = "/Zc:preprocessor"
+    } elseif ($existingCl -notmatch '(^|\s)/Zc:preprocessor($|\s)') {
+        $env:CL = "$existingCl /Zc:preprocessor"
+    }
+
+    Write-Result "OK" "TRELLIS native build environment configured for CUDA 13.4 / sm_120"
+    Write-Result "OK" "MSVC standards-conforming preprocessor enabled (/Zc:preprocessor)"
+}
+
+function Ensure-TrellisNativeBuildPackages {
+    if ($NoInstall) {
+        return
+    }
+
+    $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-m", "pip", "install", "--upgrade",
+        "ninja", "cmake", "packaging", "pybind11", "pccm"
+    )
+    if ($install.ExitCode -ne 0) {
+        throw "TRELLIS native build package installation failed: $($install.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "TRELLIS native build packages ready"
+}
+
+function Ensure-TrellisExtensionRepository {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Url,
+        [string]$Ref = $null,
+        [switch]$Recursive
+    )
+
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        throw "Git is required to install TRELLIS native extensions."
+    }
+
+    if (-not (Test-Path -LiteralPath $TrellisNativeExtensionsRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $TrellisNativeExtensionsRoot -Force | Out-Null
+    }
+
+    $target = Join-Path $TrellisNativeExtensionsRoot $Name
+
+    if (-not (Test-Path -LiteralPath (Join-Path $target ".git") -PathType Container)) {
+        if (Test-Path -LiteralPath $target) {
+            $entries = @(Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue)
+            if ($entries.Count -gt 0) {
+                throw "Native extension directory '$target' exists but is not a Git checkout. Nothing was deleted."
+            }
+            Remove-Item -LiteralPath $target -Force
+        }
+
+        $args = @("clone")
+        if ($Recursive) {
+            $args += "--recurse-submodules"
+        }
+        $args += @($Url, $target)
+
+        Write-Result "INFO" "Cloning native extension $Name..."
+        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments $args
+        if ($clone.ExitCode -ne 0) {
+            throw "Could not clone $Name`: $($clone.Output -join ' | ')"
+        }
+    }
+
+    $origin = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $target, "remote", "get-url", "origin")
+    if ($origin.ExitCode -ne 0 -or $origin.Output.Count -eq 0) {
+        throw "Could not verify Git origin for native extension $Name."
+    }
+
+    if ((Normalize-GitRemoteUrl $origin.Output[0].ToString().Trim()) -ne (Normalize-GitRemoteUrl $Url)) {
+        throw "Native extension $Name has unexpected Git origin '$($origin.Output[0])'. Nothing was modified."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Ref)) {
+        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $target, "checkout", "--detach", $Ref)
+        if ($checkout.ExitCode -ne 0) {
+            Write-Result "INFO" "Fetching pinned ref for $Name..."
+            $fetchRef = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $target, "fetch", "origin", $Ref)
+            if ($fetchRef.ExitCode -ne 0) {
+                throw "Could not fetch $Name ref $Ref`: $($fetchRef.Output -join ' | ')"
+            }
+
+            $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $target, "checkout", "--detach", "FETCH_HEAD")
+            if ($checkout.ExitCode -ne 0) {
+                throw "Could not checkout $Name ref $Ref after fetch: $($checkout.Output -join ' | ')"
+            }
+        }
+    }
+
+    if ($Recursive) {
+        $sub = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $target, "submodule", "update", "--init", "--recursive")
+        if ($sub.ExitCode -ne 0) {
+            throw "Could not update submodules for $Name`: $($sub.Output -join ' | ')"
+        }
+    }
+
+    return $target
+}
+
+function Invoke-TrellisPipInstallPath {
+    param(
+        [Parameter(Mandatory)][string]$DisplayName,
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Editable,
+        [switch]$NoDeps
+    )
+
+    if ($NoInstall) {
+        throw "$DisplayName is not installed. -NoInstall prevents native extension installation."
+    }
+
+    $args = @("-m", "pip", "install", "--no-build-isolation", "-v")
+    if ($NoDeps) {
+        $args += "--no-deps"
+    }
+    if ($Editable) {
+        $args += "-e"
+    }
+    $args += $Path
+
+    Write-Result "INFO" "Installing $DisplayName..."
+    $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments $args
+    if ($install.ExitCode -ne 0) {
+        $logDir = Join-Path $ProjectRoot "outputs\trellis-native-build"
+        if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+
+        $safeName = ($DisplayName -replace '[^A-Za-z0-9._-]+', '-').Trim('-')
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+        $logPath = Join-Path $logDir "$safeName-$stamp.log"
+        Set-Content -LiteralPath $logPath -Value ($install.Output -join [Environment]::NewLine) -Encoding UTF8
+
+        $interesting = @(
+            $install.Output |
+            Where-Object {
+                $_ -match '(?i)(fatal error|error [A-Z]?\d{3,5}|error:|nvcc fatal|unsupported|not supported|FAILED:|ninja: build stopped|cl.exe|nvcc.exe)'
+            } |
+            Select-Object -First 20
+        )
+
+        Write-Result "FAIL" "$DisplayName build failed. Full log: $logPath"
+        if ($interesting.Count -gt 0) {
+            Write-Result "INFO" "First relevant compiler diagnostics:"
+            foreach ($line in $interesting) {
+                Write-Host "  $line"
+            }
+        } else {
+            Write-Result "INFO" "No compiler diagnostic was recognized automatically; inspect the saved log."
+        }
+
+        throw "$DisplayName installation failed. See full build log: $logPath"
+    }
+
+    Write-Result "OK" "$DisplayName installation completed"
+}
+
+function Test-TrellisPythonImport {
+    param(
+        [Parameter(Mandatory)][string]$Module,
+        [string]$Label = $Module
+    )
+
+    $probe = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-c", "import $Module; print('OK')"
+    )
+    if ($probe.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            Valid = $false
+            Message = ($probe.Output -join " | ")
+        }
+    }
+
+    return [pscustomobject]@{
+        Valid = $true
+        Message = "$Label import OK"
+    }
+}
+
+function Get-TrellisNativeExtensionState {
+    $checks = @(
+        [pscustomobject]@{ Name = "spconv"; Module = "spconv.pytorch" },
+        [pscustomobject]@{ Name = "nvdiffrast"; Module = "nvdiffrast.torch" },
+        [pscustomobject]@{ Name = "diffoctreerast"; Module = "diffoctreerast" },
+        [pscustomobject]@{ Name = "diff-gaussian-rasterization"; Module = "diff_gaussian_rasterization" },
+        [pscustomobject]@{ Name = "kaolin"; Module = "kaolin" }
+    )
+
+    $results = @()
+    foreach ($check in $checks) {
+        $probe = Test-TrellisPythonImport -Module $check.Module -Label $check.Name
+        $results += [pscustomobject]@{
+            Name = $check.Name
+            Module = $check.Module
+            Valid = $probe.Valid
+            Message = $probe.Message
+        }
+    }
+
+    return $results
+}
+
+function Test-TrellisSpconvCuda {
+    $code = @'
+import torch
+import spconv.pytorch as spconv
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA unavailable")
+
+features = torch.randn((8, 4), device="cuda", dtype=torch.float32)
+indices = torch.tensor([
+    [0,0,0,0],[0,0,0,1],[0,0,1,0],[0,0,1,1],
+    [0,1,0,0],[0,1,0,1],[0,1,1,0],[0,1,1,1],
+], device="cuda", dtype=torch.int32)
+
+x = spconv.SparseConvTensor(features, indices, [2,2,2], 1)
+layer = spconv.SubMConv3d(4, 4, 3, padding=1, bias=False).cuda()
+y = layer(x)
+torch.cuda.synchronize()
+
+print(tuple(y.features.shape))
+print("SPCONV_CUDA_OK")
+'@
+    $probe = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+    if ($probe.ExitCode -ne 0 -or -not ($probe.Output -contains "SPCONV_CUDA_OK")) {
+        throw "spconv CUDA validation failed: $($probe.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "spconv CUDA sparse convolution passed on sm_120"
+}
+
+
+
+function Patch-TrellisPccmCcimportCpp17 {
+    $code = @'
+from pathlib import Path
+import ccimport
+import pccm
+
+targets = [
+    (Path(ccimport.__file__).resolve().parent / "core.py", [
+        ('std: Optional[str] = "c++14"', 'std: Optional[str] = "c++17"'),
+    ]),
+    (Path(pccm.__file__).resolve().parent / "builder" / "pybind.py", [
+        ('std="c++14"', 'std="c++17"'),
+        ('cxx_standard="14"', 'cxx_standard="17"'),
+    ]),
+]
+
+for path, replacements in targets:
+    if not path.is_file():
+        raise SystemExit(f"missing build helper: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    original = text
+
+    for old, new in replacements:
+        text = text.replace(old, new)
+
+    if text != original:
+        path.write_text(text, encoding="utf-8")
+        print(f"patched:{path}")
+    else:
+        print(f"already:{path}")
+
+# Validate the effective defaults from source text because importing the
+# modules alone does not expose all function defaults reliably.
+ccimport_core = targets[0][0].read_text(encoding="utf-8")
+pccm_pybind = targets[1][0].read_text(encoding="utf-8")
+
+if 'std: Optional[str] = "c++14"' in ccimport_core:
+    raise SystemExit("ccimport still defaults to c++14")
+if 'std="c++14"' in pccm_pybind:
+    raise SystemExit("pccm build_pybind/build_library still defaults to c++14")
+if 'cxx_standard="14"' in pccm_pybind:
+    raise SystemExit("pccm gen_cmake still defaults to c++14")
+
+print("validated")
+'@
+
+    $result = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+    if ($result.ExitCode -ne 0) {
+        throw "Could not patch pccm/ccimport C++17 defaults for CUDA 13: $($result.Output -join ' | ')"
+    }
+
+    foreach ($line in $result.Output) {
+        if ($line -eq "validated") {
+            continue
+        }
+        Write-Result "INFO" "pccm/ccimport C++17 patch: $line"
+    }
+
+    Write-Result "OK" "pccm/ccimport native build defaults pinned to C++17"
+}
+
+function Patch-TrellisCuda13Cpp17Tree {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw "$Label source directory is missing: $Root"
+    }
+
+    # spconv/cumm currently generate native build files that may force C++14.
+    # CUDA 13.x requires the generated native path to use C++17 in this stack.
+    # Patch every textual source/build descriptor in the ignored local checkout,
+    # not only CMake files, because pccm/ccimport may emit the standard from
+    # Python templates and generated Ninja/CMake fragments.
+    $extensions = @(
+        ".py", ".pyi", ".cmake", ".txt", ".in", ".ninja",
+        ".cc", ".cpp", ".cxx", ".cu", ".h", ".hpp"
+    )
+
+    $files = @(
+        Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -eq "CMakeLists.txt" -or
+            $extensions -contains $_.Extension.ToLowerInvariant()
+        }
+    )
+
+    $patchedFiles = 0
+    $replacements = 0
+
+    foreach ($file in $files) {
+        try {
+            $raw = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop
+            if ($null -eq $raw) {
+                continue
+            }
+
+            $updated = $raw
+            $pairs = @(
+                @("/std:c++14", "/std:c++17"),
+                @("-std=c++14", "-std=c++17"),
+                @("--std=c++14", "--std=c++17"),
+                @("cxx_std_14", "cxx_std_17")
+            )
+
+            foreach ($pair in $pairs) {
+                $before = $updated
+                $updated = $updated.Replace($pair[0], $pair[1])
+                if ($updated -ne $before) {
+                    $replacements++
+                }
+            }
+
+            # Match the whitespace-tolerant declarations checked by
+            # Assert-TrellisNoCpp14BuildFlags (for example: std = "c++14").
+            # Preserve spacing and quotes; change only the standard version.
+            $regexPairs = @(
+                @('(std\s*=\s*["'']c\+\+)14(["''])', '${1}17${2}'),
+                @('(std\s*=\s*["'']c\+\+17["'']\s+if\s+compat\.InMacOS\s+else\s+["'']c\+\+)14(["''])', '${1}17${2}'),
+                @('(cxx_standard\s*=\s*["''])14(["''])', '${1}17${2}'),
+                @('((?:CMAKE_)?(?:CXX|CUDA)_STANDARD\s+)14', '${1}17')
+            )
+
+            foreach ($pair in $regexPairs) {
+                $before = $updated
+                $updated = [regex]::Replace($updated, $pair[0], $pair[1])
+                if ($updated -ne $before) {
+                    $replacements++
+                }
+            }
+
+            if ($updated -ne $raw) {
+                Set-Content -LiteralPath $file.FullName -Value $updated -Encoding UTF8
+                $patchedFiles++
+            }
+        } catch {
+            # Binary/unreadable files are intentionally ignored.
+        }
+    }
+
+    Write-Result "INFO" "$Label CUDA 13 C++17 compatibility patch: $patchedFiles file(s), $replacements replacement group(s)"
+}
+
+function Assert-TrellisNoCpp14BuildFlags {
+    param(
+        [Parameter(Mandatory)][string[]]$Roots,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $patterns = @(
+        '/std:c\+\+14',
+        '(?<!-)\-std=c\+\+14',
+        '--std=c\+\+14',
+        'cxx_std_14',
+        'CXX_STANDARD\s+14',
+        'CUDA_STANDARD\s+14',
+        'CMAKE_CXX_STANDARD\s+14',
+        'CMAKE_CUDA_STANDARD\s+14',
+        'std\s*=\s*["'']c\+\+14["'']',
+        'std\s*=\s*["'']c\+\+17["'']\s+if\s+compat\.InMacOS\s+else\s+["'']c\+\+14["'']',
+        'cxx_standard\s*=\s*["'']14["'']'
+    )
+
+    $extensions = @(
+        ".py", ".pyi", ".cmake", ".txt", ".in", ".ninja",
+        ".cc", ".cpp", ".cxx", ".cu", ".h", ".hpp"
+    )
+
+    $hits = New-Object System.Collections.Generic.List[string]
+
+    foreach ($root in $Roots) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+
+        $files = @(
+            Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -eq "CMakeLists.txt" -or
+                $extensions -contains $_.Extension.ToLowerInvariant()
+            }
+        )
+
+        foreach ($file in $files) {
+            try {
+                $raw = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop
+                if ($null -eq $raw) {
+                    continue
+                }
+
+                foreach ($pattern in $patterns) {
+                    if ($raw -match $pattern) {
+                        $hits.Add("$($file.FullName) :: $pattern")
+                        break
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    if ($hits.Count -gt 0) {
+        $sample = @($hits | Select-Object -First 12) -join " | "
+        throw "$Label still contains CUDA 13-incompatible C++14 build flags after patching: $sample"
+    }
+
+    Write-Result "OK" "$Label contains no known C++14 native build flags"
+}
+
+function Reset-TrellisNativeBuildCache {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $candidates = @(
+        (Join-Path $Root "build"),
+        (Join-Path $Root "dist")
+    )
+
+    foreach ($path in $candidates) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+            Write-Result "INFO" "Removed stale $Label native build cache: $path"
+        }
+    }
+
+    Get-ChildItem -LiteralPath $Root -Directory -Filter "*.egg-info" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+            Write-Result "INFO" "Removed stale $Label metadata cache: $($_.FullName)"
+        }
+}
+
+function Patch-TrellisSpconvCompatibility {
+    param([Parameter(Mandatory)][string]$Root)
+
+    # MSVC cannot open some generated headers at their default 260+ character
+    # paths. Use pccm's build_dir option; keep the resulting module in core_cc.
+    $buildRoot = Join-Path $ProjectRoot "outputs\spconv-build"
+    $code = @'
+from pathlib import Path
+import ast
+import re
+import sys
+
+path = Path(sys.argv[1]) / "spconv" / "build.py"
+build_root = Path(sys.argv[2])
+text = path.read_text(encoding="utf-8-sig")
+marker = "# Asset Factory: short MSVC build paths"
+replacement = f"build_dir=Path({str(build_root)!r}), {marker}"
+pattern = r"(?m)^(\s*)build_dir=.*?, # Asset Factory: short MSVC build paths$"
+if marker in text:
+    updated, count = re.subn(pattern, lambda m: m[1] + replacement, text)
+else:
+    calls = [n for n in ast.walk(ast.parse(text))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "build_pybind"]
+    if len(calls) != 1 or any(k.arg == "build_dir" for k in calls[0].keywords):
+        raise SystemExit("unexpected spconv build_pybind call; refusing to overwrite build settings")
+    pattern = r"(?m)^([ \t]*)namespace_root=PACKAGE_ROOT,"
+    updated, count = re.subn(pattern, lambda m: m[0] + "\n" + m[1] + replacement, text)
+if count != 1:
+    raise SystemExit("expected exactly one spconv build directory patch")
+ast.parse(updated)
+if updated != text:
+    path.write_text(updated, encoding="utf-8")
+
+# CUDA 13's Thrust headers no longer include tuple.h transitively here.
+# Add it only to the template generating the two allocator sort kernels.
+source = Path(sys.argv[1]) / "spconv" / "csrc" / "sparse" / "all.py"
+text = source.read_text(encoding="utf-8-sig")
+needle = ("def sort_1d_by_key_allocator_template(self, use_allocator: bool):\n"
+          "        code = pccm.FunctionCode()")
+replacement = needle + '\n        code.code_after_include = "#include <thrust/tuple.h>"'
+if replacement not in text:
+    if text.count(needle) != 1:
+        raise SystemExit("unexpected spconv allocator sort template; cannot add Thrust tuple include")
+    updated = text.replace(needle, replacement, 1)
+    ast.parse(updated)
+    source.write_text(updated, encoding="utf-8")
+print(build_root)
+'@
+    $result = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code, $Root, $buildRoot)
+    if ($result.ExitCode -ne 0) {
+        throw "Could not patch spconv Windows/CUDA compatibility: $($result.Output -join ' | ')"
+    }
+    Write-Result "OK" "spconv generated build directory: $buildRoot"
+    Write-Result "OK" "spconv allocator sort kernels explicitly include thrust/tuple.h"
+}
+
+function Ensure-TrellisSpconv {
+    # Importing an editable spconv triggers JIT compilation. Patch before the
+    # first probe as well as after a fresh checkout, so reruns can reuse builds.
+    $existingSpconv = Join-Path $TrellisNativeExtensionsRoot "spconv"
+    if (Test-Path -LiteralPath (Join-Path $existingSpconv "spconv\build.py") -PathType Leaf) {
+        Patch-TrellisSpconvCompatibility -Root $existingSpconv
+        # The reuse probe can regenerate cumm/spconv code too. Apply the same
+        # C++17 patches and guard before that JIT path, not only before pip.
+        foreach ($name in @("cumm", "spconv")) {
+            $sourceRoot = Join-Path $TrellisNativeExtensionsRoot $name
+            if (Test-Path -LiteralPath $sourceRoot -PathType Container) {
+                Patch-TrellisCuda13Cpp17Tree -Root $sourceRoot -Label $name
+                Assert-TrellisNoCpp14BuildFlags -Roots @($sourceRoot) -Label "$name existing source tree"
+            }
+        }
+    }
+    $probe = Test-TrellisPythonImport -Module "spconv.pytorch" -Label "spconv"
+    if ($probe.Valid) {
+        try {
+            Test-TrellisSpconvCuda
+            return
+        } catch {
+            Write-Result "WARN" "Existing spconv is not usable on this Blackwell runtime; rebuilding from public source."
+        }
+    }
+
+    if ($NoInstall) {
+        throw "spconv is missing or unusable. -NoInstall prevents source installation."
+    }
+
+    Set-TrellisNativeBuildEnvironment
+    Ensure-TrellisNativeBuildPackages
+    Patch-TrellisPccmCcimportCpp17
+
+    # Remove any old binary variants first. Upstream spconv explicitly warns
+    # against mixing spconv/cumm CUDA packages.
+    $uninstall = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-m", "pip", "uninstall", "-y",
+        "spconv", "spconv-cu120", "spconv-cu121", "spconv-cu124", "spconv-cu126", "spconv-cu128", "spconv-cu130",
+        "cumm", "cumm-cu120", "cumm-cu121", "cumm-cu124", "cumm-cu126", "cumm-cu128", "cumm-cu130"
+    )
+    if ($uninstall.ExitCode -ne 0) {
+        Write-Result "WARN" "Cleanup of previous spconv/cumm packages returned exit code $($uninstall.ExitCode); continuing with source build."
+    }
+
+    $cumm = Ensure-TrellisExtensionRepository -Name "cumm" -Url $TrellisCummRepoUrl -Recursive
+    $spconv = Ensure-TrellisExtensionRepository -Name "spconv" -Url $TrellisSpconvRepoUrl -Recursive
+    Patch-TrellisSpconvCompatibility -Root $spconv
+
+    # Important: patch BOTH source trees before installing cumm. spconv's
+    # generated core_cc code imports templates/headers from cumm, so patching
+    # spconv alone leaves /std:c++14 in generated Windows build commands.
+    Patch-TrellisCuda13Cpp17Tree -Root $cumm -Label "cumm"
+    Patch-TrellisCuda13Cpp17Tree -Root $spconv -Label "spconv"
+    Assert-TrellisNoCpp14BuildFlags -Roots @($cumm, $spconv) -Label "cumm/spconv source trees"
+
+    # The previous failed attempt may already have generated core_cc/Ninja files
+    # containing /std:c++14. Remove only disposable build outputs so they are
+    # regenerated from the patched source trees.
+    Reset-TrellisNativeBuildCache -Root $cumm -Label "cumm"
+    Reset-TrellisNativeBuildCache -Root $spconv -Label "spconv"
+
+    Invoke-TrellisPipInstallPath -DisplayName "cumm (source)" -Path $cumm -Editable -NoDeps
+
+    # cumm installation can generate additional local build descriptors.
+    # Patch once more before spconv triggers its own pccm/ccimport generation.
+    Patch-TrellisCuda13Cpp17Tree -Root $cumm -Label "cumm"
+    Patch-TrellisCuda13Cpp17Tree -Root $spconv -Label "spconv"
+    Assert-TrellisNoCpp14BuildFlags -Roots @($cumm, $spconv) -Label "cumm/spconv regenerated trees"
+
+    Invoke-TrellisPipInstallPath -DisplayName "spconv (source)" -Path $spconv -Editable -NoDeps
+    Test-TrellisSpconvCuda
+}
+
+
+function Ensure-TrellisNvdiffrast {
+    $probe = Test-TrellisPythonImport -Module "nvdiffrast.torch" -Label "nvdiffrast"
+    if ($probe.Valid) {
+        Write-Result "OK" "nvdiffrast import already works"
+        return
+    }
+
+    Set-TrellisNativeBuildEnvironment
+    Ensure-TrellisNativeBuildPackages
+    $repo = Ensure-TrellisExtensionRepository -Name "nvdiffrast" -Url $TrellisNvdiffrastRepoUrl -Ref $TrellisNvdiffrastRef
+    Invoke-TrellisPipInstallPath -DisplayName "nvdiffrast pinned source" -Path $repo -NoDeps
+
+    $verify = Test-TrellisPythonImport -Module "nvdiffrast.torch" -Label "nvdiffrast"
+    if (-not $verify.Valid) {
+        throw "nvdiffrast import validation failed: $($verify.Message)"
+    }
+    Write-Result "OK" "nvdiffrast import validated"
+}
+
+function Ensure-TrellisDiffOctreeRast {
+    $probe = Test-TrellisPythonImport -Module "diffoctreerast" -Label "diffoctreerast"
+    if ($probe.Valid) {
+        Write-Result "OK" "diffoctreerast import already works"
+        return
+    }
+
+    Set-TrellisNativeBuildEnvironment
+    Ensure-TrellisNativeBuildPackages
+    $repo = Ensure-TrellisExtensionRepository -Name "diffoctreerast" -Url $TrellisDiffOctreeRepoUrl -Recursive
+    Invoke-TrellisPipInstallPath -DisplayName "diffoctreerast" -Path $repo -NoDeps
+
+    $verify = Test-TrellisPythonImport -Module "diffoctreerast" -Label "diffoctreerast"
+    if (-not $verify.Valid) {
+        throw "diffoctreerast import validation failed: $($verify.Message)"
+    }
+    Write-Result "OK" "diffoctreerast import validated"
+}
+
+function Ensure-TrellisMipGaussian {
+    $probe = Test-TrellisPythonImport -Module "diff_gaussian_rasterization" -Label "diff-gaussian-rasterization"
+    if ($probe.Valid) {
+        Write-Result "OK" "diff-gaussian-rasterization import already works"
+        return
+    }
+
+    Set-TrellisNativeBuildEnvironment
+    Ensure-TrellisNativeBuildPackages
+    $repo = Ensure-TrellisExtensionRepository -Name "mip-splatting" -Url $TrellisMipSplattingRepoUrl -Recursive
+    $subdir = Join-Path $repo "submodules\diff-gaussian-rasterization"
+    if (-not (Test-Path -LiteralPath $subdir -PathType Container)) {
+        throw "mip-splatting diff-gaussian-rasterization submodule is missing: $subdir"
+    }
+
+    Invoke-TrellisPipInstallPath -DisplayName "mip-splatting diff-gaussian-rasterization" -Path $subdir -NoDeps
+
+    $verify = Test-TrellisPythonImport -Module "diff_gaussian_rasterization" -Label "diff-gaussian-rasterization"
+    if (-not $verify.Valid) {
+        throw "diff-gaussian-rasterization import validation failed: $($verify.Message)"
+    }
+    Write-Result "OK" "diff-gaussian-rasterization import validated"
+}
+
+
+function Ensure-TrellisKaolinBuildPrerequisites {
+    # Kaolin v0.18.0 executes setup.py during metadata generation. Its setup.py
+    # imports pkg_resources, Cython and NumPy before the actual extension build,
+    # so all of them must already exist in the non-isolated TRELLIS runtime.
+    $code = @'
+import sys
+
+errors = []
+
+try:
+    import setuptools
+    import pkg_resources
+    print("setuptools=" + setuptools.__version__)
+except Exception as exc:
+    errors.append("pkg_resources/setuptools: " + repr(exc))
+
+try:
+    import Cython
+    print("cython=" + Cython.__version__)
+except Exception as exc:
+    errors.append("Cython: " + repr(exc))
+
+try:
+    import numpy
+    print("numpy=" + numpy.__version__)
+except Exception as exc:
+    errors.append("numpy: " + repr(exc))
+
+try:
+    import pybind11
+    print("pybind11=" + pybind11.__version__)
+except Exception as exc:
+    errors.append("pybind11: " + repr(exc))
+
+if errors:
+    print(" | ".join(errors))
+    raise SystemExit(1)
+'@
+
+    $probe = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+    if ($probe.ExitCode -eq 0) {
+        foreach ($line in $probe.Output) {
+            Write-Result "OK" "Kaolin build prerequisite: $line"
+        }
+        return
+    }
+
+    if ($NoInstall) {
+        throw "Kaolin build prerequisites are incomplete. -NoInstall prevents repair. Details: $($probe.Output -join ' | ')"
+    }
+
+    Write-Result "INFO" "Installing the complete Kaolin v0.18.0 metadata/build prerequisite set..."
+    $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
+        "-m", "pip", "install", "--upgrade",
+        "setuptools==80.10.2",
+        "Cython==3.0.12",
+        "numpy",
+        "pybind11"
+    )
+    if ($install.ExitCode -ne 0) {
+        throw "Could not install Kaolin build prerequisites: $($install.Output -join ' | ')"
+    }
+
+    $verify = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @("-c", $code)
+    if ($verify.ExitCode -ne 0) {
+        throw "Kaolin build prerequisites were installed but validation still fails: $($verify.Output -join ' | ')"
+    }
+
+    foreach ($line in $verify.Output) {
+        Write-Result "OK" "Kaolin build prerequisite: $line"
+    }
+}
+
+function Ensure-TrellisKaolinRuntimeDependencies {
+    # We build Kaolin with --no-deps to prevent its old setup metadata from
+    # unexpectedly changing the validated PyTorch stack. Install the non-Torch
+    # runtime requirements explicitly instead.
+    if ($NoInstall) {
+        return
+    }
+
+    $packages = @(
+        "usd-core",
+        "Pillow>=8.0.0",
+        "tqdm>=4.51.0",
+        "scipy",
+        "pygltflib",
+        "warp-lang"
+    )
+
+    Write-Result "INFO" "Installing Kaolin non-Torch runtime dependencies..."
+    $args = @("-m", "pip", "install", "--upgrade") + $packages
+    $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments $args
+    if ($install.ExitCode -ne 0) {
+        throw "Kaolin runtime dependency installation failed: $($install.Output -join ' | ')"
+    }
+
+    Write-Result "OK" "Kaolin non-Torch runtime dependencies ready"
+}
+
+function Ensure-TrellisKaolin {
+    $probe = Test-TrellisPythonImport -Module "kaolin" -Label "kaolin"
+    if ($probe.Valid) {
+        Write-Result "OK" "kaolin import already works"
+        return
+    }
+
+    if ($NoInstall) {
+        throw "kaolin is missing. -NoInstall prevents source installation."
+    }
+
+    Set-TrellisNativeBuildEnvironment
+    Ensure-TrellisNativeBuildPackages
+    Ensure-TrellisKaolinBuildPrerequisites
+    Ensure-TrellisKaolinRuntimeDependencies
+
+    $repo = Ensure-TrellisExtensionRepository -Name "kaolin" -Url $TrellisKaolinRepoUrl -Ref $TrellisKaolinRef -Recursive
+
+    # Kaolin v0.18 officially validates much older PyTorch releases than our
+    # isolated 2.13 runtime, but current source knows CUDA 13 and sm_120.
+    # Keep the override local to this install attempt and validate the import after.
+    $oldIgnore = $env:IGNORE_TORCH_VER
+    $env:IGNORE_TORCH_VER = "1"
+    try {
+        Invoke-TrellisPipInstallPath -DisplayName "kaolin $TrellisKaolinRef (source)" -Path $repo -NoDeps
+    } finally {
+        if ($null -eq $oldIgnore) {
+            Remove-Item Env:\IGNORE_TORCH_VER -ErrorAction SilentlyContinue
+        } else {
+            $env:IGNORE_TORCH_VER = $oldIgnore
+        }
+    }
+
+    $verify = Test-TrellisPythonImport -Module "kaolin" -Label "kaolin"
+    if (-not $verify.Valid) {
+        throw "kaolin import validation failed: $($verify.Message)"
+    }
+    Write-Result "OK" "kaolin import validated"
+}
+
+function Ensure-TrellisNativeExtensionsStage2 {
+    Write-Header "TRELLIS Native Extensions - AF-08C Stage 2"
+
+    Set-TrellisNativeBuildEnvironment
+    Ensure-TrellisNativeBuildPackages
+
+    # Install in dependency-risk order so failures are localized and reruns
+    # resume from already validated components.
+    Ensure-TrellisNvdiffrast
+    Ensure-TrellisDiffOctreeRast
+    Ensure-TrellisMipGaussian
+    Ensure-TrellisKaolin
+    Ensure-TrellisSpconv
+
+    Write-Result "OK" "TRELLIS AF-08C native stage 2 extensions validated"
+}
+
+function Test-TrellisNativeExtensionsStage2 {
+    $failures = 0
+    $state = Get-TrellisNativeExtensionState
+
+    foreach ($item in $state) {
+        if ($item.Valid) {
+            Write-Result "OK" "$($item.Name) import"
+        } else {
+            Write-Result "FAIL" "$($item.Name): $($item.Message)"
+            $failures++
+        }
+    }
+
+    if ($failures -eq 0) {
+        try {
+            Test-TrellisSpconvCuda
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    return $failures
+}
+
+
 function Show-TrellisNativeStatus {
     Write-Header "TRELLIS Native Status"
 
@@ -2255,8 +3371,16 @@ function Show-TrellisNativeStatus {
         Write-Result "WARN" "xformers $($xformers.Version) is installed but incompatible with this Blackwell stack"
     }
 
-    Write-Result "INFO" "Selected attention backend: $TrellisAttentionBackend"
-    Write-Result "INFO" "Remaining TRELLIS native rendering/sparse-convolution extensions are handled in the next stage."
+    Write-Result "INFO" "Dense attention backend: $TrellisAttentionBackend"
+    Write-Result "INFO" "Sparse attention: upstream TRELLIS 442aa1e requires xformers/flash_attn; Asset Factory compatibility is handled outside the upstream checkout"
+
+    foreach ($item in (Get-TrellisNativeExtensionState)) {
+        if ($item.Valid) {
+            Write-Result "OK" "$($item.Name) import"
+        } else {
+            Write-Result "MISSING" "$($item.Name)"
+        }
+    }
 }
 
 function Invoke-TrellisNativeInstall {
@@ -2274,8 +3398,11 @@ function Invoke-TrellisNativeInstall {
     Remove-TrellisBrokenXFormers
 
     Write-Result "OK" "TRELLIS AF-08C native stage 1 validated"
-    Write-Result "INFO" "Attention backend: PyTorch SDPA CUDA"
-    Write-Result "INFO" "xformers is optional and is removed automatically when its CUDA kernels do not support the detected Blackwell GPU."
+    Write-Result "INFO" "Validated attention primitive: PyTorch SDPA CUDA"
+
+    Ensure-TrellisNativeExtensionsStage2
+
+    Write-Result "OK" "TRELLIS AF-08C native installation validated"
 }
 
 function Invoke-TrellisNativeDoctor {
@@ -2327,13 +3454,17 @@ function Invoke-TrellisNativeDoctor {
         Write-Result "OK" "xformers absent; no incompatible attention backend can be selected accidentally."
     }
 
+    if ($failures -eq 0) {
+        $failures += Test-TrellisNativeExtensionsStage2
+    }
+
     if ($failures -gt 0) {
         Write-Result "FAIL" "TRELLIS native doctor found $failures blocking issue(s)."
         return 1
     }
 
-    Write-Result "OK" "TRELLIS AF-08C native stage 1 is healthy."
-    Write-Result "INFO" "Selected attention backend: PyTorch SDPA CUDA"
+    Write-Result "OK" "TRELLIS AF-08C native stages 1 and 2 are healthy."
+    Write-Result "INFO" "Validated attention primitive: PyTorch SDPA CUDA"
     return 0
 }
 
@@ -2401,8 +3532,8 @@ function Show-TrellisRuntimeStatus {
         Write-Result "MISSING" "TRELLIS runtime PyTorch not ready"
     }
 
-    Write-Result "INFO" "Native TRELLIS CUDA extensions: deferred to AF-08C"
-    Write-Result "INFO" "Inference/model download: not enabled yet"
+    Write-Result "INFO" "Use 'trellis native-status' for AF-08C native extension state."
+    Write-Result "INFO" "Use trellis model-install to prepare local models, or trellis model-status to verify them offline."
 }
 
 function Invoke-TrellisInstall {
@@ -2495,6 +3626,8 @@ function Invoke-TrellisRuntimeInstall {
     Ensure-TrellisRuntimePyTorch
     Ensure-TrellisRuntimeBasicPackages
     Test-TrellisRuntimeBasicImports
+    Test-TrellisSdpa
+    Remove-TrellisBrokenXFormers
 
     Write-Result "OK" "TRELLIS AF-08B runtime foundation validated"
     Write-Result "INFO" "PyTorch CUDA 13 is isolated inside .venv-runtime; system CUDA Toolkit 12.8 was not modified."
@@ -2557,6 +3690,24 @@ function Invoke-TrellisRuntimeDoctor {
         }
     }
 
+    if ($failures -eq 0) {
+        try {
+            Test-TrellisSdpa
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
+    }
+
+    $xformers = Get-TrellisXFormersInfo
+    if ($xformers.Installed -and -not $xformers.CudaKernel) {
+        Write-Result "WARN" "xformers $($xformers.Version) is installed but unusable on this Blackwell runtime; rerun 'trellis runtime-install' to remove it."
+    } elseif ($xformers.Installed -and $xformers.CudaKernel) {
+        Write-Result "INFO" "xformers $($xformers.Version) is present, but Asset Factory does not select it on Blackwell."
+    } else {
+        Write-Result "OK" "xformers absent; verified PyTorch SDPA remains the supported attention primitive."
+    }
+
     if ($failures -gt 0) {
         Write-Result "FAIL" "TRELLIS runtime doctor found $failures blocking issue(s)."
         return 1
@@ -2578,8 +3729,59 @@ function Invoke-TrellisRepair {
 function Invoke-TrellisSmokeTest {
     Write-Header "TRELLIS Smoke Test"
     Write-Result "WARN" "TRELLIS inference smoke is not enabled yet."
-    Write-Result "INFO" "AF-08C must validate native CUDA extensions before model download and PNG-to-GLB inference."
+    Write-Result "INFO" "Use tools\run-trellis.ps1 for image-to-GLB inference after trellis model-install."
 }
+
+function Invoke-TrellisModelPreparation {
+    param([switch]$CheckOnly)
+
+    Write-Header "TRELLIS Offline Models"
+    Assert-BootstrapHost
+
+    $helper = Join-Path $ProjectRoot "tools\trellis_models.py"
+    $modelsDirectory = Join-Path $ProjectRoot "models\trellis"
+
+    if (-not (Test-Path -LiteralPath $TrellisRuntimeVenvPython -PathType Leaf)) {
+        throw "TRELLIS runtime is missing. Run 'trellis runtime-install' first."
+    }
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+        throw "Asset Factory model helper is missing: $helper. Extract the complete offline update pack."
+    }
+
+    $mode = if ($CheckOnly -or $NoInstall) { "--check" } else { "--install" }
+    $arguments = @(
+        "-B", "-s", "-u",
+        $helper,
+        $mode,
+        "--models-dir", $modelsDirectory
+    )
+
+    Write-Result "INFO" "Model directory: $modelsDirectory"
+    if ($mode -eq "--check") {
+        Write-Result "INFO" "Validation only: no downloads, package installs or engine source changes."
+    } else {
+        Write-Result "INFO" "Preparing TRELLIS weights, pinned DINOv2 source/weights and U2Net."
+        Write-Result "INFO" "Existing cached model files will be reused when available. No native rebuild."
+    }
+
+    # Stream download progress. Do not merge stderr through 2>&1 on PS 5.1.
+    $previousPreference = $ErrorActionPreference
+    $exitCode = 1
+    try {
+        $ErrorActionPreference = "Continue"
+        & $TrellisRuntimeVenvPython @arguments
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    if ($exitCode -ne 0) {
+        throw "TRELLIS model preparation/validation failed (exit code $exitCode). See the diagnostic above."
+    }
+
+    Write-Result "OK" "Local model files validated. The offline runner is ready for a generation test."
+}
+
 
 function Invoke-TrellisCommand {
     switch ($EngineCommand) {
@@ -2603,9 +3805,8 @@ function Invoke-TrellisCommand {
             $exitCode = Invoke-TrellisNativeDoctor
             if ($exitCode -ne 0) { exit $exitCode }
         }
-        "model-install" {
-            Write-Result "WARN" "TRELLIS model-install is not enabled yet; model download follows native runtime validation."
-        }
+        "model-install"   { Invoke-TrellisModelPreparation }
+        "model-status"    { Invoke-TrellisModelPreparation -CheckOnly }
     }
 }
 
@@ -3865,6 +5066,8 @@ Usage:
   .\setup-asset-factory.ps1 trellis status
   .\setup-asset-factory.ps1 trellis doctor
   .\setup-asset-factory.ps1 trellis runtime-install
+  .\setup-asset-factory.ps1 trellis model-install
+  .\setup-asset-factory.ps1 trellis model-status
   .\setup-asset-factory.ps1 trellis runtime-status
   .\setup-asset-factory.ps1 trellis runtime-doctor
   .\setup-asset-factory.ps1 trellis native-install
@@ -3883,7 +5086,7 @@ Commands:
   comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair, model-install.
   trellis   Manage TRELLIS v1. AF-08A handles the pinned official repo/bootstrap venv;
             AF-08B runtime-* handles the isolated Python 3.12 / PyTorch CUDA 13 runtime foundation;
-            AF-08C native-* validates CUDA/MSVC/sm_120 and uses PyTorch SDPA on Blackwell.
+            AF-08C native-* validates CUDA/MSVC/sm_120, PyTorch SDPA and required TRELLIS native extensions.
   help      Show this help.
 
 Options:
@@ -3896,8 +5099,16 @@ Important:
   - The FLUX Schnell checkpoint is opt-in: use `comfyui model-install`; an existing valid checkpoint is reused.
   - TRELLIS v1 is pinned to a validated source revision and uses separate bootstrap/runtime venvs.
   - TRELLIS runtime PyTorch CUDA 13 is isolated; the system CUDA Toolkit used by other engines is not replaced.
-  - AF-08C uses PyTorch SDPA as the default attention backend on Blackwell. xformers is optional and removed if its CUDA kernels are incompatible.
-  - Remaining TRELLIS native extensions and model weights remain staged until their Windows/Blackwell compatibility is validated.
+  - AF-08C uses PyTorch SDPA on Blackwell. Upstream TRELLIS 442aa1e has no sparse SDPA backend; unsupported xformers builds are removed rather than selected.
+  - `trellis native-install` installs native TRELLIS extensions from public upstream source checkouts under the ignored runtime tree and validates each component.
+  - Windows native builds are pinned to the detected VS2022 Build Tools environment so setuptools cannot silently select a newer Visual Studio toolchain.
+  - Native extension installation is idempotent: successful components are reused on rerun after a later component fails.
+  - Kaolin v0.18.0 prerequisites are prepared explicitly: setuptools 80.10.2/pkg_resources, Cython 3.0.12, NumPy, pybind11 and its non-Torch runtime dependencies.
+  - spconv/cumm local source trees are patched to C++17 before generation because upstream CUDA 13 builds can still emit C++14 native build flags.
+  - pccm/ccimport build-helper defaults are also patched from C++14 to C++17 so spconv JIT/native validation cannot regenerate -std=c++14.
+  - TRELLIS model-install prepares and verifies local weights, DINOv2 source/weights and U2Net; no native rebuild.
+  - TRELLIS model-status (or model-install -NoInstall) verifies the local bundle without network access.
+  - The Asset Factory runner uses local models only; missing model files are reported instead of downloaded.
   - Engine repositories, venvs, downloaded models and generated outputs are local runtime data, not repository source.
   - Each AI engine uses an isolated Python environment.
   - Heavy GPU workloads must remain sequential on the ~8 GiB target GPU.

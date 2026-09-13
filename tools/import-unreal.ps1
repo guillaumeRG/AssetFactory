@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
@@ -6,11 +6,10 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$FbxPath,
+    [Alias("FbxPath", "GlbPath")]
+    [string]$SourcePath,
 
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$AssetId,
+    [string]$AssetId = "",
 
     [string]$Category = ""
 )
@@ -127,9 +126,13 @@ function Invoke-UnrealImport {
             $ErrorActionPreference = $previousErrorActionPreference
         }
 
+        $logPath = [System.IO.Path]::ChangeExtension($JobPath, ".log")
+        $output | ForEach-Object { $_.ToString() } |
+            Set-Content -LiteralPath $logPath -Encoding UTF8
         foreach ($line in $output) {
             Write-Host $line
         }
+        Write-Info "Unreal log: $logPath"
 
         return $exitCode
     }
@@ -143,16 +146,29 @@ function Invoke-UnrealImport {
 }
 
 $ResolvedProfilePath = Resolve-FullPath -Path $ProfilePath
-$ResolvedFbxPath = Resolve-FullPath -Path $FbxPath
+$ResolvedSourcePath = Resolve-FullPath -Path $SourcePath
 
 if (-not (Test-Path -LiteralPath $ResolvedProfilePath -PathType Leaf)) {
     Write-Fail "Project profile not found: $ResolvedProfilePath"
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath $ResolvedFbxPath -PathType Leaf)) {
-    Write-Fail "FBX not found: $ResolvedFbxPath"
+if (-not (Test-Path -LiteralPath $ResolvedSourcePath -PathType Leaf)) {
+    Write-Fail "Source model not found: $ResolvedSourcePath"
     exit 1
+}
+
+$SourceExtension = [System.IO.Path]::GetExtension($ResolvedSourcePath).ToLowerInvariant()
+if ($SourceExtension -notin @(".fbx", ".glb")) {
+    Write-Fail "Unsupported model format '$SourceExtension'. Expected .fbx or .glb."
+    exit 1
+}
+if ((Get-Item -LiteralPath $ResolvedSourcePath).Length -le 0) {
+    Write-Fail "Source model is empty: $ResolvedSourcePath"
+    exit 1
+}
+if ([string]::IsNullOrWhiteSpace($AssetId)) {
+    $AssetId = [System.IO.Path]::GetFileNameWithoutExtension($ResolvedSourcePath)
 }
 
 if (-not (Test-Path -LiteralPath $ImportScript -PathType Leaf)) {
@@ -207,19 +223,36 @@ catch {
     exit 1
 }
 
+$IsGlb = $SourceExtension -eq ".glb"
 $ImportSettings = [ordered]@{
     replaceExisting = $true
-    importMaterials = $false
-    importTextures = $false
+    importMaterials = $IsGlb
+    importTextures = $IsGlb
     combineMeshes = $true
     generateLightmapUVs = $true
     autoGenerateCollision = $true
+    # GLB materials can have generic names; isolate each asset to avoid collisions.
+    assetSubfolder = $IsGlb
 }
 
-if ($Profile.PSObject.Properties.Name -contains "import" -and $null -ne $Profile.import) {
-    foreach ($property in $ImportSettings.Keys.Clone()) {
-        if ($Profile.import.PSObject.Properties.Name -contains $property) {
-            $ImportSettings[$property] = [bool]$Profile.import.$property
+# General settings remain compatible with TripoSR. Optional GLB-specific
+# overrides avoid changing the material/texture policy for existing FBX imports.
+$settingsBlocks = @("import")
+if ($IsGlb) {
+    $settingsBlocks += "importGlb"
+}
+foreach ($blockName in $settingsBlocks) {
+    if ($Profile.PSObject.Properties.Name -contains $blockName -and
+        $null -ne $Profile.$blockName) {
+        $block = $Profile.$blockName
+        foreach ($property in @($ImportSettings.Keys)) {
+            if ($block.PSObject.Properties.Name -contains $property) {
+                if ($block.$property -isnot [bool]) {
+                    Write-Fail "Profile $blockName.$property must be a JSON boolean."
+                    exit 1
+                }
+                $ImportSettings[$property] = [bool]$block.$property
+            }
         }
     }
 }
@@ -234,12 +267,16 @@ $JobPath = Join-Path $ImportJobsRoot "$stamp-$safeAssetId.json"
 
 $Job = [ordered]@{
     jobId = "$stamp-$safeAssetId"
+    logPath = [System.IO.Path]::ChangeExtension($JobPath, ".log")
     createdAt = (Get-Date).ToString("o")
     status = "pending"
     error = $null
     profilePath = $ResolvedProfilePath
     projectPath = $ProjectPath
-    fbxPath = $ResolvedFbxPath
+    sourcePath = $ResolvedSourcePath
+    sourceFormat = $SourceExtension.TrimStart(".")
+    # Preserve the legacy field for existing FBX consumers and saved jobs.
+    fbxPath = $(if (-not $IsGlb) { $ResolvedSourcePath } else { $null })
     assetId = $AssetId
     category = $Category
     contentRoot = [string]$Profile.contentRoot
@@ -254,7 +291,9 @@ $Job | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $JobPath -Encoding UT
 Write-Ok "Project profile loaded: $ResolvedProfilePath"
 Write-Ok "Unreal project found: $ProjectPath"
 Write-Ok "UnrealEditor-Cmd found: $UnrealEditorCmd"
-Write-Info "FBX: $ResolvedFbxPath"
+Write-Info "Source: $ResolvedSourcePath"
+Write-Info "Format: $($SourceExtension.TrimStart('.'))"
+Write-Info "Materials: $($ImportSettings.importMaterials) / Textures: $($ImportSettings.importTextures)"
 Write-Info "AssetId: $AssetId"
 Write-Info "Category: $Category"
 Write-Info "Destination root: $($Profile.contentRoot)"
@@ -263,10 +302,20 @@ Write-Info "Importing asset into Unreal..."
 $Job.status = "running"
 $Job | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $JobPath -Encoding UTF8
 
-$exitCode = Invoke-UnrealImport `
-    -UnrealEditorCmd $UnrealEditorCmd `
-    -ProjectPath $ProjectPath `
-    -JobPath $JobPath
+try {
+    $exitCode = Invoke-UnrealImport `
+        -UnrealEditorCmd $UnrealEditorCmd `
+        -ProjectPath $ProjectPath `
+        -JobPath $JobPath
+}
+catch {
+    $Job.status = "failed"
+    $Job.error = $_.Exception.Message
+    $Job | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $JobPath -Encoding UTF8
+    Write-Fail $Job.error
+    Write-Fail "Import metadata: $JobPath"
+    exit 1
+}
 
 if (-not (Test-Path -LiteralPath $JobPath -PathType Leaf)) {
     Write-Fail "Unreal import job metadata disappeared: $JobPath"
@@ -282,6 +331,9 @@ if ($exitCode -ne 0 -or [string]$result.status -ne "completed") {
         "Unreal import failed with exit code $exitCode."
     }
 
+    $result.status = "failed"
+    $result.error = $message
+    $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $JobPath -Encoding UTF8
     Write-Fail $message
     Write-Fail "Import metadata: $JobPath"
     exit 1

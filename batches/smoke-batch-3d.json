@@ -1,0 +1,15 @@
+{
+  "batchId": "smoke-batch-3d",
+  "assets": [
+    {
+      "id": "crate_a",
+      "prompt": "small sci-fi cargo container, hard surface design, clean silhouette, neutral studio background",
+      "negativePrompt": "",
+      "seed": 1234
+    }
+  ],
+  "mode": "full",
+  "engine": "trellis",
+  "projectProfile": "profiles/nullon.json",
+  "targetHeight": 1.0
+}

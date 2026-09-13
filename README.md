@@ -1,434 +1,457 @@
 # Asset Factory
 
-Asset Factory est une chaîne locale, modulaire et reproductible de génération et de préparation d’assets 3D.
+Asset Factory est une chaîne locale de génération et de préparation d'assets 3D à partir d'un prompt texte.
 
-## Objectifs
-
-Le pipeline actuellement validé permet de chaîner :
+Le but est simple :
 
 ```text
 Prompt
-  -> génération d'image
+  -> image générée par IA
   -> génération 3D
-  -> post-traitement du mesh
-  -> normalisation
-  -> mise à l'échelle
-  -> export OBJ / FBX
+  -> normalisation dans Blender
+  -> import optionnel dans Unreal Engine
 ```
 
-Les composants actuellement utilisés sont :
+Deux moteurs image-vers-3D sont pris en charge :
 
-- ComfyUI pour l’exécution des workflows de génération d’images ;
-- FLUX.1-schnell FP8 comme modèle d’image de référence ;
-- TripoSR pour la conversion image vers 3D ;
-- Blender pour le post-traitement et l’export des meshes ;
-- PowerShell pour le bootstrap et l’orchestration ;
-- des environnements Python isolés pour les moteurs IA.
+- **TRELLIS** : génère un GLB texturé ;
+- **TripoSR** : génère un mesh 3D plus simple et rapide.
+
+Le moteur peut être choisi à chaque génération avec `-Engine trellis` ou `-Engine triposr`.
 
 ---
 
-## Principes
+## 1. Prérequis
 
-Asset Factory suit quelques règles simples :
+Le bootstrap cible actuellement **Windows** avec :
 
-- installation reproductible ;
-- composants locaux isolés ;
-- réutilisation des outils déjà installés lorsque c’est possible ;
-- pas de modèles ou moteurs lourds versionnés dans Git ;
-- traitements GPU lourds exécutés séquentiellement par défaut ;
-- métadonnées conservées pour chaque job et pipeline ;
-- sorties intermédiaires conservées lorsqu’elles facilitent le diagnostic ;
-- paramètres propres au projet consommateur configurables plutôt que codés en dur.
+- Windows PowerShell 5.1+ ou PowerShell 7+ ;
+- un GPU compatible CUDA recommandé ;
+- Blender pour la normalisation des meshes ;
+- Unreal Engine uniquement si l'import automatique est utilisé.
+
+Les moteurs, modèles IA et environnements Python sont installés localement et ne sont pas versionnés dans Git.
 
 ---
 
-## Structure du dépôt
+## 2. Installation rapide
+
+Cloner le dépôt :
+
+```powershell
+git clone https://github.com/guillaumeRG/AssetFactory.git
+Set-Location .\AssetFactory
+```
+
+Installer ou détecter les outils communs :
+
+```powershell
+.\setup-asset-factory.ps1 install
+```
+
+Installer ComfyUI et son modèle d'image :
+
+```powershell
+.\setup-asset-factory.ps1 comfyui install
+.\setup-asset-factory.ps1 comfyui model-install
+```
+
+Installer TripoSR si ce moteur doit être utilisé :
+
+```powershell
+.\setup-asset-factory.ps1 triposr install
+```
+
+Installer TRELLIS si ce moteur doit être utilisé :
+
+```powershell
+.\setup-asset-factory.ps1 trellis runtime-install
+.\setup-asset-factory.ps1 trellis model-install
+```
+
+Vérifier l'installation :
+
+```powershell
+.\setup-asset-factory.ps1 status
+.\setup-asset-factory.ps1 doctor
+```
+
+Les commandes d'installation sont prévues pour être **idempotentes** : les composants déjà installés et valides sont réutilisés.
+
+---
+
+## 3. Démarrer ComfyUI
+
+Le serveur ComfyUI doit être lancé avant une génération complète.
+
+Depuis la racine d'Asset Factory :
+
+```powershell
+Set-Location .\engines\comfyui
+.\.venv\Scripts\python.exe .\main.py --lowvram --listen 127.0.0.1 --port 8188
+```
+
+Laisser ce terminal ouvert.
+
+L'interface et l'API sont ensuite disponibles sur :
+
+```text
+http://127.0.0.1:8188
+```
+
+Revenir dans un autre terminal à la racine du dépôt :
+
+```powershell
+Set-Location <chemin-vers-AssetFactory>
+```
+
+---
+
+## 4. Générer un asset 3D
+
+### Avec TRELLIS
+
+```powershell
+.\tools\run-image-to-3d.ps1 `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -AssetId "StorageTank_01" `
+    -TargetHeight 1.5 `
+    -Engine trellis
+```
+
+Le cycle est :
+
+```text
+Prompt
+  -> ComfyUI
+  -> PNG
+  -> TRELLIS
+  -> GLB texturé
+  -> Blender
+  -> GLB normalisé
+```
+
+Le GLB final est placé sous :
+
+```text
+outputs\pipelines\<pipeline-id>\processed\StorageTank_01.glb
+```
+
+Le nom du fichier 3D reprend le nom de l'asset / du PNG.
+
+### Avec TripoSR
+
+```powershell
+.\tools\run-image-to-3d.ps1 `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -AssetId "StorageTank_01" `
+    -TargetHeight 1.5 `
+    -Engine triposr
+```
+
+Le cycle est :
+
+```text
+Prompt
+  -> ComfyUI
+  -> PNG
+  -> TripoSR
+  -> mesh brut
+  -> Blender
+  -> OBJ / FBX normalisés
+```
+
+Si `-Engine` n'est pas renseigné, **TripoSR reste le moteur par défaut** pour conserver la compatibilité avec les anciennes commandes.
+
+Il n'y a pas de basculement automatique vers l'autre moteur en cas d'erreur.
+
+---
+
+## 5. Paramètres principaux
+
+Les paramètres les plus utiles de `run-image-to-3d.ps1` sont :
+
+```text
+-Prompt         description de l'asset à générer
+-AssetId        nom de l'asset et des fichiers produits
+-Seed           seed de génération d'image
+-TargetHeight   hauteur finale souhaitée en mètres
+-Engine         trellis ou triposr
+-ProjectProfile profil de destination optionnel
+-AutoImport     active ou désactive l'import automatique
+```
+
+Exemple sans import automatique :
+
+```powershell
+.\tools\run-image-to-3d.ps1 `
+    -Prompt "small sci-fi crate" `
+    -AssetId "Crate_01" `
+    -TargetHeight 0.8 `
+    -Engine trellis `
+    -AutoImport $false
+```
+
+---
+
+## 6. Import automatique dans Unreal Engine
+
+L'import Unreal est **optionnel** et piloté par un profil JSON.
+
+Exemple :
+
+```powershell
+.\tools\run-image-to-3d.ps1 `
+    -Prompt "small industrial console" `
+    -AssetId "Console_01" `
+    -TargetHeight 1.2 `
+    -Engine trellis `
+    -ProjectProfile ".\profiles\mon-projet.json" `
+    -AutoImport $true
+```
+
+Le profil contient les chemins et options propres au projet consommateur. Asset Factory ne contient aucune règle spécifique à un jeu ou à un produit particulier.
+
+Pour TRELLIS, les GLB sont importés avec leurs matériaux et textures lorsque le profil le permet.
+
+### Important : éditeur Unreal déjà ouvert
+
+L'import automatique utilise `UnrealEditor-Cmd`.
+
+Si Unreal Editor est déjà ouvert pendant l'import, les fichiers `.uasset` peuvent être créés correctement sur disque sans apparaître immédiatement dans le Content Browser de l'éditeur déjà lancé.
+
+Dans ce cas :
+
+1. vérifier que les `.uasset` existent dans le dossier `Content` du projet ;
+2. fermer Unreal Editor ;
+3. rouvrir le projet.
+
+Les assets importés apparaîtront alors dans le Content Browser.
+
+Il n'est pas nécessaire de régénérer le modèle 3D pour refaire uniquement l'import.
+
+---
+
+## 7. Générer uniquement une image
+
+Avec ComfyUI déjà démarré :
+
+```powershell
+.\tools\run-comfyui.ps1 `
+    -Prompt "industrial storage container, clean silhouette, neutral studio background" `
+    -Seed 1234
+```
+
+Les images et métadonnées sont stockées sous :
+
+```text
+outputs\jobs\
+```
+
+---
+
+## 8. Générer directement depuis une image existante
+
+### TRELLIS
+
+```powershell
+.\tools\run-trellis.ps1 `
+    -InputPath ".\mon-image.png"
+```
+
+Le GLB généré reprend le nom du PNG :
+
+```text
+mon-image.png -> mon-image.glb
+```
+
+### TripoSR
+
+```powershell
+.\tools\run-triposr.ps1 `
+    -InputPath ".\mon-image.png"
+```
+
+---
+
+## 9. Génération par lots
+
+Les batches sont décrits par des manifestes JSON dans :
+
+```text
+batches\
+```
+
+Pour lancer un batch complet avec TRELLIS :
+
+```powershell
+.\tools\run-batch.ps1 `
+    -BatchPath ".\batches\mon-batch.json" `
+    -Engine trellis
+```
+
+Avec TripoSR :
+
+```powershell
+.\tools\run-batch.ps1 `
+    -BatchPath ".\batches\mon-batch.json" `
+    -Engine triposr
+```
+
+Les traitements GPU lourds sont exécutés séquentiellement afin de limiter les conflits de VRAM.
+
+Les anciens batches d'images peuvent rester en mode image uniquement. Le mode 3D complet doit être demandé explicitement lorsqu'il n'est pas défini dans le manifeste.
+
+---
+
+## 10. Sorties
+
+Chaque pipeline possède son propre dossier :
+
+```text
+outputs\pipelines\<pipeline-id>\
+```
+
+Exemple avec TRELLIS :
+
+```text
+outputs\pipelines\<pipeline-id>\
+├─ input\
+│  └─ StorageTank_01.png
+├─ generated\
+│  └─ trellis\
+│     └─ StorageTank_01.glb
+├─ processed\
+│  └─ StorageTank_01.glb
+├─ logs\
+└─ pipeline.json
+```
+
+`pipeline.json` indique notamment :
+
+- le moteur utilisé ;
+- l'image d'entrée ;
+- le modèle généré ;
+- les dimensions finales ;
+- la hauteur cible ;
+- le statut du pipeline ;
+- l'étape ayant échoué, le cas échéant.
+
+Les fichiers intermédiaires sont conservés afin qu'une étape en erreur puisse être diagnostiquée ou relancée sans recalculer tout le pipeline.
+
+---
+
+## 11. TRELLIS hors ligne
+
+Une fois les modèles installés avec :
+
+```powershell
+.\setup-asset-factory.ps1 trellis model-install
+```
+
+le runner TRELLIS utilise les modèles locaux préparés par Asset Factory.
+
+Pour vérifier leur présence :
+
+```powershell
+.\setup-asset-factory.ps1 trellis model-status
+```
+
+Le but est que la génération courante ne dépende pas d'un téléchargement de modèles à chaque exécution.
+
+---
+
+## 12. Vérifications utiles
+
+État général :
+
+```powershell
+.\setup-asset-factory.ps1 status
+```
+
+Diagnostic général :
+
+```powershell
+.\setup-asset-factory.ps1 doctor
+```
+
+ComfyUI :
+
+```powershell
+.\setup-asset-factory.ps1 comfyui status
+.\setup-asset-factory.ps1 comfyui doctor
+```
+
+TripoSR :
+
+```powershell
+.\setup-asset-factory.ps1 triposr status
+.\setup-asset-factory.ps1 triposr doctor
+```
+
+TRELLIS :
+
+```powershell
+.\setup-asset-factory.ps1 trellis model-status
+```
+
+Test des contrats du cycle sans lancer de génération réelle :
+
+```powershell
+.\tests\test-cycle-contracts.ps1
+```
+
+---
+
+## 13. Structure simplifiée du dépôt
 
 ```text
 AssetFactory/
 ├─ batches/
 ├─ blender/
 │  └─ scripts/
-│     └─ process-mesh.py
 ├─ docs/
 ├─ engines/
-│  ├─ comfyui/        # installation locale, ignorée par Git
-│  └─ triposr/        # installation locale, ignorée par Git
-├─ jobs/
-├─ orchestrator/
+│  ├─ comfyui/
+│  ├─ trellis/
+│  └─ triposr/
+├─ models/
 ├─ outputs/
+├─ profiles/
 ├─ tools/
+│  ├─ import-unreal.ps1
 │  ├─ run-batch.ps1
 │  ├─ run-comfyui.ps1
 │  ├─ run-image-to-3d.ps1
+│  ├─ run-trellis.ps1
 │  └─ run-triposr.ps1
+├─ unreal/
 ├─ workflows/
-│  └─ comfyui-flux-schnell-base.json
 ├─ setup-asset-factory.ps1
 └─ README.md
 ```
----
 
-# Installation
-
-Le bootstrap actuel cible Windows avec Windows PowerShell 5.1+ ou PowerShell 7+.
-
-Cloner le dépôt :
-
-```powershell
-git clone https://github.com/guillaumeRG/AssetFactory.git
-```
-
-Entrer dans le dépôt :
-
-```powershell
-Set-Location .\AssetFactory
-```
-
-Installer ou détecter les outils partagés :
-
-```powershell
-.\setup-asset-factory.ps1 install
-```
-
-Le bootstrap tente de réutiliser les installations existantes lorsque celles-ci sont compatibles.
-
-Pour effectuer uniquement la détection et l’initialisation sans installer de logiciel :
-
-```powershell
-.\setup-asset-factory.ps1 install -NoInstall
-```
-
-Afficher l’état général :
-
-```powershell
-.\setup-asset-factory.ps1 status
-```
-
-Vérifier le bootstrap partagé :
-
-```powershell
-.\setup-asset-factory.ps1 doctor
-```
+Les dossiers contenant les moteurs, modèles lourds et sorties de génération doivent rester hors Git lorsqu'ils sont déjà couverts par les règles du dépôt.
 
 ---
 
-# Installation de TripoSR
+## 14. Philosophie du projet
 
-Installer l’environnement isolé TripoSR :
+Asset Factory doit rester un **générateur d'assets générique**.
 
-```powershell
-.\setup-asset-factory.ps1 triposr install
-```
+Aucune règle métier, artistique ou technique propre à un jeu donné ne doit être codée en dur dans son cœur.
 
-Afficher son état :
-
-```powershell
-.\setup-asset-factory.ps1 triposr status
-```
-
-Vérifier son environnement :
-
-```powershell
-.\setup-asset-factory.ps1 triposr doctor
-```
-
-Lancer le test réel image vers 3D :
-
-```powershell
-.\setup-asset-factory.ps1 triposr smoke
-```
-
-Les sorties du smoke test sont placées sous :
+Les particularités d'un projet consommateur doivent être décrites dans des profils ou manifestes :
 
 ```text
-outputs\triposr-smoke\
-```
-
-TripoSR utilise son propre environnement Python. Certaines dépendances natives peuvent nécessiter un toolkit CUDA et une chaîne de compilation C++ compatibles avec la version de PyTorch sélectionnée par le bootstrap.
-
----
-
-# Installation de ComfyUI
-
-Installer l’environnement isolé ComfyUI :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui install
-```
-
-Afficher son état :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui status
-```
-
-Vérifier son environnement :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui doctor
-```
-
-Tester le démarrage de l’API :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui smoke
-```
-
-Le smoke test démarre temporairement ComfyUI sur un port local libre, vérifie que l’API répond, puis arrête le processus.
-
----
-
-# Installation du modèle d’image
-
-Le workflow de référence actuel utilise :
-
-```text
-flux1-schnell-fp8.safetensors
-```
-
-Installer le checkpoint :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui model-install
-```
-
-La commande est idempotente : un modèle déjà présent et valide est réutilisé.
-
-Emplacement attendu :
-
-```text
-engines\comfyui\models\checkpoints\flux1-schnell-fp8.safetensors
-```
-
-Le checkpoint n’est pas stocké dans Git en raison de sa taille.
-
-Source de référence :
-
-```text
-Comfy-Org/flux1-schnell
-```
-
----
-
-# Démarrer ComfyUI
-
-Depuis le répertoire :
-
-```text
-engines\comfyui
-```
-
-lancer :
-
-```powershell
-.\.venv\Scripts\python.exe main.py --lowvram
-```
-
-L’API locale par défaut est alors disponible sur :
-
-```text
-http://127.0.0.1:8188
-```
-
-Le mode de lancement pourra évoluer afin d’être géré directement par l’orchestrateur.
-
----
-
-# Générer une image
-
-Une fois l’API ComfyUI démarrée :
-
-```powershell
-.\tools\run-comfyui.ps1 `
-  -Prompt "industrial storage container, clean silhouette, neutral studio background" `
-  -Seed 1234
-```
-
-Le runner :
-
-1. charge le workflow API de référence ;
-2. injecte le prompt, le prompt négatif et la seed ;
-3. crée un job indépendant ;
-4. soumet le workflow à ComfyUI ;
-5. attend sa fin ;
-6. récupère les images générées ;
-7. écrit les résultats et métadonnées dans `outputs\jobs\`.
-
-Chaque job possède son propre `job.json`.
-
----
-
-# Générer un asset 3D complet
-
-Le pipeline image vers 3D peut être lancé avec :
-
-```powershell
-.\tools\run-image-to-3d.ps1 `
-  -Prompt "industrial storage container, clean silhouette, neutral studio background" `
-  -Seed 1234 `
-  -TargetHeight 1.0
-```
-
-`TargetHeight` correspond actuellement à la hauteur cible en mètres.
-
-Le pipeline exécute successivement :
-
-```text
-ComfyUI
-  -> image PNG
-  -> TripoSR
-  -> mesh OBJ brut
-  -> Blender
-  -> transformations appliquées
-  -> normales recalculées
-  -> centrage X/Y
-  -> base placée sur Z = 0
-  -> mise à l'échelle
-  -> OBJ traité
-  -> FBX
-```
-
-Les sorties sont regroupées sous :
-
-```text
-outputs\pipelines\<pipeline-id>\
-```
-
-Exemple :
-
-```text
-outputs\pipelines\<pipeline-id>\
-├─ processed\
-│  ├─ mesh.obj
-│  └─ mesh.fbx
-└─ pipeline.json
-```
-
-`pipeline.json` conserve notamment les identifiants des sous-jobs, les chemins des fichiers, la hauteur demandée, les dimensions finales et le facteur d’échelle appliqué.
-
----
-
-# Génération par lots
-
-Un batch est décrit dans un manifeste JSON placé par exemple sous :
-
-```text
-batches\
-```
-
-Le runner de batch est :
-
-```powershell
-.\tools\run-batch.ps1 -ManifestPath .\batches\smoke-batch.json
-```
-
-Les assets sont traités séquentiellement afin d’éviter que plusieurs charges GPU lourdes se disputent les mêmes ressources.
-
-Les métadonnées du batch sont stockées sous :
-
-```text
-outputs\batches\<batch-id>\
-```
-
-
----
-
-# Workflow ComfyUI de référence
-
-Le workflow actuellement utilisé est :
-
-```text
-workflows\comfyui-flux-schnell-base.json
-```
-
-Configuration de référence actuelle :
-
-```text
-résolution : 1024x1024
-batch size : 1
-steps : 4
-CFG : 1
-sampler : euler
-scheduler : simple
-denoise : 1
-```
-
-Le runner dépend de certains identifiants de nodes du workflow. Toute modification structurelle du graphe doit donc être accompagnée d’une validation du runner.
-
----
-
-# Portabilité entre projets
-
-Asset Factory ne doit pas contenir de règles propres à un jeu ou produit particulier.
-
-Les éléments spécifiques à un projet consommateur doivent être fournis sous forme de configuration ou de manifestes, par exemple :
-
-```text
-profil artistique
+chemin du projet de destination
+répertoire d'import
 catégorie d'asset
-dimensions cibles
+hauteur cible
 nomenclature
+matériaux / textures
 format de sortie
-règles de collision
-règles de LOD
-répertoire ou moteur de destination
+règles d'import
 ```
 
-Un même Asset Factory doit ainsi pouvoir servir plusieurs projets sans fork de son cœur technique.
-
----
-
-# Portabilité entre machines
-
-Le dépôt ne suppose pas une configuration matérielle précise.
-
-Le bootstrap détecte les composants disponibles et les environnements des moteurs restent isolés. Les capacités réelles dépendent néanmoins des moteurs et modèles activés.
-
-Les points qui peuvent varier selon la machine sont notamment :
-
-- système d’exploitation supporté par le bootstrap ;
-- présence d’un GPU compatible ;
-- quantité de VRAM ;
-- version du pilote GPU ;
-- toolkit CUDA éventuellement nécessaire ;
-- chaîne de compilation native ;
-- version de Blender ;
-- espace disque disponible.
-
-Les profils d’installation et de calcul devront rester configurables afin de pouvoir adapter Asset Factory à plusieurs classes de machines.
-
----
-
-# Validation
-
-Validation générale :
-
-```powershell
-.\setup-asset-factory.ps1 doctor
-```
-
-Validation TripoSR :
-
-```powershell
-.\setup-asset-factory.ps1 triposr doctor
-```
-
-Validation ComfyUI :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui doctor
-```
-
-Smoke test TripoSR :
-
-```powershell
-.\setup-asset-factory.ps1 triposr smoke
-```
-
-Smoke test ComfyUI :
-
-```powershell
-.\setup-asset-factory.ps1 comfyui smoke
-```
----
+Le même dépôt Asset Factory doit donc pouvoir produire des assets pour plusieurs projets sans modification de son code central.

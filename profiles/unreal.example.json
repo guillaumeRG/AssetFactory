@@ -12,5 +12,10 @@
     "combineMeshes": true,
     "generateLightmapUVs": true,
     "autoGenerateCollision": true
+  },
+  "importGlb": {
+    "importMaterials": true,
+    "importTextures": true,
+    "assetSubfolder": true
   }
 }
