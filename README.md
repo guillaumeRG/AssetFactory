@@ -159,11 +159,37 @@ Prompt
   -> GLB normalisé
 ```
 
-Le GLB final est placé sous :
+Le GLB final est placé dans la génération de l'asset sous `final/`.
+
+### Avec TRELLIS multi-vues
+
+Le même point d'entrée peut exécuter toute la chaîne multi-vues jusqu'à Blender et à l'import Unreal optionnel :
+
+```powershell
+.\tools\run-image-to-3d.ps1 `
+    -Mode multiview `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -AssetId "StorageTank_MV_01" `
+    -ReferenceCandidates 8 `
+    -ReferencePreset "multiview-rigid" `
+    -TargetHeight 1.5
+```
+
+Le cycle devient :
 
 ```text
-outputs\pipelines\<pipeline-id>\processed\StorageTank_01.glb
+Prompt
+  -> ComfyUI / FLUX
+  -> sélection d'une image de référence
+  -> génération multi-vues
+  -> sélection des vues
+  -> TRELLIS multi-image
+  -> Blender
+  -> GLB normalisé
+  -> import Unreal optionnel
 ```
+
+`run-multiview.ps1` et `run-multiview-to-3d.ps1` restent disponibles séparément pour le debug et les reprises ciblées.
 
 ### Avec TripoSR
 
@@ -200,9 +226,23 @@ Les paramètres les plus utiles de `run-image-to-3d.ps1` sont :
 -AssetId        nom de l'asset et des fichiers produits
 -Seed           seed de génération d'image
 -TargetHeight   hauteur finale souhaitée en mètres
--Engine         trellis ou triposr
+-Mode           single ou multiview
+-Engine         trellis ou triposr (mode single)
 -ProjectProfile profil de destination optionnel
 -AutoImport     active ou désactive l'import automatique
+```
+
+En `-Mode multiview`, les paramètres usuels supplémentaires sont :
+
+```text
+-ReferenceCandidates nombre de références FLUX candidates
+-ReferencePreset     preset de préparation de la référence
+-ReferenceExclude    détails à exclure de la référence
+-ViewPolicy          all, balanced ou quality
+-MaxViews            nombre maximal de vues données à TRELLIS
+-MinViewScore        score minimal d'une vue
+-FusionMode          stochastic ou multidiffusion
+-IncludeReference    inclut ou non l'image de référence dans TRELLIS
 ```
 
 Exemple sans import automatique :

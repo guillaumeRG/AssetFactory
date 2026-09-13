@@ -48,6 +48,13 @@ class MultiViewStaticTests(unittest.TestCase):
         profile = self.json("profiles/multiview.example.json")
         self.assertEqual(profile["method"], "zero123plus-v1.1")
 
+    def test_reference_candidates_limit_matches_top_level_runner(self):
+        child = self.text("tools/run-multiview.ps1")
+        top = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn("[ValidateRange(1, 64)]", child)
+        self.assertIn("ReferenceCandidates doit être compris entre 1 et 64.", child)
+        self.assertIn("[ValidateRange(1, 64)]", top)
+
     def test_reference_quality_features_are_configurable(self):
         runner = self.text("tools/run-multiview.ps1")
         self.assertIn('[int]$ReferenceCandidates = 1', runner)
@@ -226,6 +233,59 @@ class MultiViewQualityTests(unittest.TestCase):
             report = multiview_quality.analyze_multiview(paths)
             self.assertIn("vues_trop_similaires", report["warnings"])
             self.assertLess(report["score"], 100.0)
+
+
+class RunImageTo3DMultiviewIntegrationTests(unittest.TestCase):
+    def text(self, path: str) -> str:
+        return (ROOT / path).read_text(encoding="utf-8-sig")
+
+    def test_main_pipeline_exposes_multiview_mode(self):
+        runner = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn('[ValidateSet("single", "multiview")]', runner)
+        self.assertIn('[string]$Mode = "single"', runner)
+        self.assertIn('$MultiViewRunner = Join-Path $PSScriptRoot "run-multiview.ps1"', runner)
+        self.assertIn('$MultiViewGeometryRunner = Join-Path $PSScriptRoot "run-multiview-to-3d.ps1"', runner)
+        self.assertIn('if ($Mode -eq "multiview")', runner)
+        self.assertIn('Invoke-AFMultiViewCycle', runner)
+
+    def test_main_pipeline_forwards_quality_and_reference_parameters(self):
+        runner = self.text("tools/run-image-to-3d.ps1")
+        for token in (
+            '[int]$ReferenceCandidates = 1',
+            '[string]$ReferencePreset = ""',
+            '[string[]]$ReferenceExclude = @()',
+            '[string]$FusionMode = ""',
+            '[System.Nullable[bool]]$IncludeReference = $null',
+            '[int[]]$ViewIndices = @()',
+            '[string]$ViewPolicy = ""',
+            '[System.Nullable[int]]$MaxViews = $null',
+            '[System.Nullable[double]]$MinViewScore = $null',
+        ):
+            self.assertIn(token, runner)
+        self.assertIn('$multiviewParameters.ReferenceExclude = @($ReferenceExclude)', runner)
+        self.assertIn('$geometryParameters.ViewIndices = @($ViewIndices)', runner)
+        self.assertIn('$geometryParameters.ProjectProfile = $ProjectProfile', runner)
+        self.assertIn('$geometryParameters.AutoImport = $AutoImport', runner)
+
+    def test_main_pipeline_reuses_specialized_runners_instead_of_duplicating_them(self):
+        runner = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn('Invoke-AFCommand -Executable $MultiViewRunner', runner)
+        self.assertIn('Invoke-AFCommand -Executable $MultiViewGeometryRunner', runner)
+        self.assertNotIn('pipeline.run_multi_image(', runner)
+
+    def test_child_runners_expose_machine_readable_results(self):
+        multiview = self.text("tools/run-multiview.ps1")
+        geometry = self.text("tools/run-multiview-to-3d.ps1")
+        self.assertIn('kind = "asset-factory-multiview-generation"', multiview)
+        self.assertIn('generationRoot = $Layout.Root', multiview)
+        self.assertIn('kind = "asset-factory-multiview-3d"', geometry)
+        self.assertIn('unrealStatus = $GeometryMetadata.unreal.status', geometry)
+
+    def test_single_mode_remains_backward_compatible(self):
+        runner = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn('[string]$Engine = "triposr"', runner)
+        self.assertIn('[string]$Mode = "single"', runner)
+        self.assertIn('$GeometryRunner = Join-Path $PSScriptRoot "run-$Engine.ps1"', runner)
 
 
 if __name__ == "__main__":

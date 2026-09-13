@@ -56,7 +56,39 @@ TripoSR :
     -Engine triposr
 ```
 
-Sans `-Engine`, TripoSR reste le moteur par défaut.
+Sans `-Engine`, TripoSR reste le moteur par défaut du mode `single`.
+
+## Cycle multi-vues depuis le même point d'entrée
+
+Le mode multi-vues est également lancé par `run-image-to-3d.ps1` :
+
+```powershell
+.\tools\run-image-to-3d.ps1 `
+    -Mode multiview `
+    -Prompt "single rigid industrial work light, isolated object, neutral studio background" `
+    -AssetId "WorkLight_MV_01" `
+    -ReferenceCandidates 8 `
+    -ReferencePreset "multiview-rigid" `
+    -ReferenceExclude "power cable","loose wire" `
+    -TargetHeight 1.2 `
+    -ProjectProfile ".\profiles\mon-projet.json" `
+    -AutoImport $true
+```
+
+Cette commande enchaîne :
+
+```text
+prompt ou image
+  -> référence(s) FLUX
+  -> sélection de la référence
+  -> moteur multi-vues
+  -> scoring / sélection des vues
+  -> TRELLIS run_multi_image()
+  -> Blender
+  -> import Unreal optionnel
+```
+
+Le mode multi-vues impose TRELLIS pour la reconstruction. Les runners `run-multiview.ps1` et `run-multiview-to-3d.ps1` restent des points d'entrée spécialisés pour le debug ou la reprise d'une étape sans recalculer toute la chaîne.
 
 ## Versionnement des générations
 

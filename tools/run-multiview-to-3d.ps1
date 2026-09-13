@@ -457,6 +457,20 @@ try {
     Write-AFOk "Modèle brut : $expectedRaw"
     Write-AFOk "Modèle final : $expectedFinal"
     Write-AFOk "Métadonnées : $GeometryMetadataPath"
+    $result = [ordered]@{
+        kind = "asset-factory-multiview-3d"
+        status = "completed"
+        generationId = $(Get-AFProperty $GenerationMetadata "generationId" "$AssetId-$AssetVersion")
+        assetId = $AssetId
+        assetVersion = $AssetVersion
+        generationRoot = $Layout.Root
+        engine = "trellis"
+        meshPath = $expectedFinal
+        rawMeshPath = $expectedRaw
+        metadataPath = $GeometryMetadataPath
+        unrealStatus = $GeometryMetadata.unreal.status
+    }
+    Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
     $ExitCode = 0
 }
 catch {

@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$Prompt = "",
     [string]$NegativePrompt = "",
@@ -18,7 +18,7 @@ param(
     [System.Nullable[double]]$GuidanceScale = $null,
     [System.Nullable[bool]]$KeepGrid = $null,
     [string]$ConditioningPrompt = "",
-    [ValidateRange(1, 8)]
+    [ValidateRange(1, 64)]
     [int]$ReferenceCandidates = 1,
     [string]$ReferencePreset = "",
     [string[]]$ReferenceExclude = @(),
@@ -132,7 +132,8 @@ try {
 
     if ($resolvedSteps -lt 1 -or $resolvedSteps -gt 200) { throw "Steps doit être compris entre 1 et 200." }
     if ($resolvedGuidance -lt 0 -or $resolvedGuidance -gt 30) { throw "GuidanceScale doit être compris entre 0 et 30." }
-    if ($resolvedReferenceCandidates -lt 1 -or $resolvedReferenceCandidates -gt 8) { throw "ReferenceCandidates doit être compris entre 1 et 8." }
+    if ($resolvedReferenceCandidates -lt 1 -or $resolvedReferenceCandidates -gt 64) { throw "ReferenceCandidates doit être compris entre 1 et 64." }
+    if ($resolvedReferenceCandidates -gt 16) { Write-AFInfo "ReferenceCandidates=$resolvedReferenceCandidates : cette étape lancera autant de générations ComfyUI." }
 
     $resolvedPresetConfig = $null
     if (-not [string]::IsNullOrWhiteSpace($resolvedReferencePreset) -and $resolvedReferencePreset -ne "none") {
@@ -373,6 +374,19 @@ try {
     if (@(Get-OptionalSetting $qualityReport "warnings" @()).Count -gt 0) {
         Write-AFInfo ("Avertissements qualité : " + (@(Get-OptionalSetting $qualityReport "warnings" @()) -join ", "))
     }
+    $result = [ordered]@{
+        kind = "asset-factory-multiview-generation"
+        status = "completed"
+        generationId = $Metadata.generationId
+        assetId = $AssetId
+        assetVersion = $Layout.Version
+        generationRoot = $Layout.Root
+        referencePath = $ReferencePath
+        viewsPath = $ViewsDir
+        viewCount = $viewCount
+        metadataPath = $MetadataPath
+    }
+    Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
     exit 0
 }
 catch {
