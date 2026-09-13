@@ -10,8 +10,8 @@ from .fmha import BlockDiagonalMask
 
 
 def _sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, p: float, scale: float | None) -> torch.Tensor:
-    # xFormers/TRELLIS tensors are [B, N, H, C]. PyTorch SDPA expects
-    # [B, H, N, C].
+    # Les tenseurs xFormers/TRELLIS sont au format [B, N, H, C]. PyTorch SDPA attend
+    # le format [B, H, N, C].
     q_t = q.transpose(1, 2)
     k_t = k.transpose(1, 2)
     v_t = v.transpose(1, 2)
@@ -37,10 +37,10 @@ def memory_efficient_attention(
     op: object | None = None,
     **_: object,
 ) -> torch.Tensor:
-    """Subset of ``xformers.ops.memory_efficient_attention`` used by TRELLIS.
+    """Sous-ensemble de ``xformers.ops.memory_efficient_attention`` utilisé par TRELLIS.
 
-    ``op`` is accepted for API compatibility but intentionally ignored: PyTorch
-    chooses the available SDPA implementation for the current GPU.
+    ``op`` est accepté pour compatibilité avec l'API mais volontairement ignoré : PyTorch
+    choisit l'implémentation SDPA disponible pour le GPU courant.
     """
 
     del op

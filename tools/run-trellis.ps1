@@ -54,7 +54,7 @@ function Resolve-UnrealImportConfiguration {
         return $result
     }
 
-    # Project profiles use project-relative paths, as in run-image-to-3d.ps1.
+    # Les profils de projet utilisent des chemins relatifs au projet, comme dans run-image-to-3d.ps1.
     $resolvedProfile = $ProjectProfile
     if (-not [System.IO.Path]::IsPathRooted($resolvedProfile)) {
         $resolvedProfile = Join-Path $AssetFactoryRoot $resolvedProfile
@@ -80,7 +80,7 @@ function Resolve-UnrealImportConfiguration {
         if (-not (Test-Path -LiteralPath $UnrealImportRunner -PathType Leaf)) {
             throw "Unreal import runner not found: $UnrealImportRunner"
         }
-        # Validate the destination before spending time generating the asset.
+        # Valide la destination avant de consacrer du temps à la génération de l'asset.
         foreach ($property in @("engine", "projectPath", "contentRoot")) {
             if (-not ($profile.PSObject.Properties.Name -contains $property) -or
                 [string]::IsNullOrWhiteSpace([string]$profile.$property)) {
@@ -129,7 +129,7 @@ if (-not (Test-Path -LiteralPath $CompatRoot -PathType Container)) {
     throw "Asset Factory TRELLIS compatibility layer is missing: $CompatRoot"
 }
 
-# Resolve paths in the caller's directory, before changing the working directory.
+# Résout les chemins dans le répertoire de l'appelant avant de changer de répertoire de travail.
 if (-not [string]::IsNullOrWhiteSpace($InputPath)) {
     $InputPath = Resolve-AssetFactoryPath -Path $InputPath
 }
@@ -228,8 +228,8 @@ try {
         $arguments += "--save-ply"
     }
 
-    # Outer pipelines capture stderr. In Windows PowerShell 5.1, harmless
-    # Python warnings must not become terminating NativeCommandError records.
+    # Les pipelines externes capturent stderr. Sous Windows PowerShell 5.1, les avertissements Python
+    # sans gravité ne doivent pas devenir des enregistrements NativeCommandError fatals.
     $nativePreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -254,7 +254,7 @@ try {
 
     Write-Host "[OK] TRELLIS GLB generated: $glb"
 
-    # Python has exited, so TRELLIS no longer occupies GPU memory when Unreal starts.
+    # Python s'est arrêté ; TRELLIS n'occupe donc plus la mémoire GPU au démarrage d'Unreal.
     if ($unrealConfig.autoImport) {
         Write-Host "[INFO] Importing the generated GLB into Unreal..."
         $global:LASTEXITCODE = 0

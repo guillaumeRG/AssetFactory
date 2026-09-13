@@ -1,5 +1,5 @@
-﻿# Shared orchestration helpers. No engine source or global environment changes.
-# Compatible with Windows PowerShell 5.1 and PowerShell 7.
+﻿# Fonctions d'orchestration partagées. Aucune modification des sources des moteurs ni de l'environnement global.
+# Compatible avec Windows PowerShell 5.1 et PowerShell 7.
 
 function Write-AFInfo {
     param([string]$Message)
@@ -67,7 +67,7 @@ function Assert-AFFile {
 function Assert-AFFileStem {
     param([string]$Name, [string]$Label = "AssetId")
 
-    # Explicit Windows rules also make validation deterministic in Linux tests.
+    # Des règles Windows explicites rendent également la validation déterministe dans les tests Linux.
     if ([string]::IsNullOrWhiteSpace($Name) -or $Name.Length -gt 120 -or
         $Name -match '[<>:"/\\|?*\x00-\x1f]' -or
         $Name -in @(".", "..") -or $Name -match '[. ]$' -or
@@ -112,8 +112,8 @@ function Invoke-AFCommand {
     $useParameters = $PSBoundParameters.ContainsKey("Parameters")
 
     try {
-        # stderr is diagnostic data, not a terminating NativeCommandError in PS5.
-        # The callee's exit code and output artifacts decide success.
+        # stderr contient des données de diagnostic, pas une NativeCommandError fatale sous PS5.
+        # Le code de sortie de l'appelé et les artefacts produits déterminent le succès.
         $ErrorActionPreference = "Continue"
         $PSNativeCommandUseErrorActionPreference = $false
         $global:LASTEXITCODE = 0
@@ -125,8 +125,8 @@ function Invoke-AFCommand {
                 } else {
                     & $Executable @Arguments
                 }
-                # Capture inside this scope. exit in a child .ps1 updates this
-                # scope's LASTEXITCODE, not necessarily the caller's variable.
+                # Capture dans cette portée. exit dans un .ps1 enfant met à jour le LASTEXITCODE
+                # de cette portée, pas nécessairement la variable de l'appelant.
                 $executionState.ExitCode = $LASTEXITCODE
             } catch {
                 $executionState.ExitCode = 1
@@ -245,8 +245,8 @@ function Request-AFComfyMemoryRelease {
     Invoke-RestMethod -Uri "$baseUrl/free" -Method Post `
         -ContentType "application/json" -Body $body -TimeoutSec 10 | Out-Null
 
-    # /free only schedules unloading. Wait for ComfyUI's own torch reservation
-    # to fall below 256 MiB; this is not a claim about other GPU applications.
+    # /free ne fait que planifier le déchargement. On attend que la réservation torch propre à ComfyUI
+    # passe sous 256 Mio ; cela ne dit rien sur les autres applications utilisant le GPU.
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 500

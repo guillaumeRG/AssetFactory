@@ -1,4 +1,4 @@
-"""Static PowerShell handoff checks; these are NOT execution tests."""
+"""Vérifications statiques du passage PowerShell ; ce ne sont PAS des tests d'exécution."""
 from pathlib import Path
 import re
 

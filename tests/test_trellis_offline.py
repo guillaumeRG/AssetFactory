@@ -1,7 +1,7 @@
-"""Offline adapter regression tests: local fixtures/mocks, no GPU or downloads.
+"""Tests de régression de l'adaptateur hors ligne : fixtures/mocks locaux, sans GPU ni téléchargement.
 
-Run: python -B -m unittest discover -s tests -p test_trellis_offline.py -v
-These tests do not constitute validation of a real TRELLIS inference on CUDA.
+Exécution : python -B -m unittest discover -s tests -p test_trellis_offline.py -v
+Ces tests ne constituent pas une validation d'une véritable inférence TRELLIS sous CUDA.
 """
 from __future__ import annotations
 

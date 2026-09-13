@@ -1,10 +1,10 @@
-"""Asset Factory compatibility shim for the tiny xFormers surface used by TRELLIS.
+"""Shim de compatibilité Asset Factory pour la petite surface xFormers utilisée par TRELLIS.
 
-This is not xFormers.  TRELLIS commit 442aa1e hard-codes its sparse attention
-backend to either ``xformers`` or ``flash_attn``.  On Windows/Blackwell, the
-official xFormers wheel does not currently provide a usable memory-efficient
-attention kernel.  Asset Factory therefore exposes only the two symbols TRELLIS
-needs and implements them with PyTorch SDPA.
+Il ne s'agit pas de xFormers. Le commit TRELLIS 442aa1e impose en dur le backend
+d'attention creuse ``xformers`` ou ``flash_attn``. Sous Windows/Blackwell, le wheel
+officiel xFormers ne fournit actuellement aucun kernel d'attention économe en mémoire
+utilisable. Asset Factory n'expose donc que les deux symboles requis par TRELLIS
+et les implémente avec PyTorch SDPA.
 """
 
 ASSET_FACTORY_SDPA_SHIM = True

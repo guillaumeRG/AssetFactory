@@ -1,8 +1,8 @@
-"""Asset Factory: prepare and verify the TRELLIS model bundle.
+"""Asset Factory : prépare et vérifie le bundle de modèles TRELLIS.
 
-Network access belongs to --install only. --check uses the standard library
-and local files. Nothing in the engine checkout or the installed packages is
-patched. Completed files are copied out of the user's caches, not moved.
+L'accès réseau est réservé à --install. --check utilise la bibliothèque standard
+et les fichiers locaux. Rien n'est modifié dans le checkout du moteur ni dans les
+packages installés. Les fichiers terminés sont copiés depuis les caches utilisateur, pas déplacés.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def default_models_dir() -> Path:
 
 
 def inside(root: Path, relative: str) -> Path:
-    """Accept portable relative file names only, including when run on Windows."""
+    """N'accepte que des noms de fichiers relatifs et portables, y compris sous Windows."""
     if not isinstance(relative, str) or not relative or "\\" in relative or ":" in relative:
         raise ValueError(f"Invalid model path: {relative!r}")
     parts = PurePosixPath(relative).parts
@@ -104,7 +104,7 @@ def record_matches(path: Path, record: dict[str, Any] | None) -> bool:
 
 
 def required_model_files(config: dict[str, Any]) -> list[str]:
-    """Read the upstream model list; reject remote references instead of guessing."""
+    """Lit la liste de modèles amont ; rejette les références distantes au lieu de les deviner."""
     if config.get("name") != "TrellisImageTo3DPipeline":
         raise ValueError("This bundle supports the TRELLIS v1 image pipeline only")
     arguments = config["args"]
@@ -124,7 +124,7 @@ def required_model_files(config: dict[str, Any]) -> list[str]:
 
 
 def validate_bundle(root: Path) -> dict[str, Any]:
-    """Full size/SHA-256 check. This function does not import any network library."""
+    """Vérification complète taille/SHA-256. Cette fonction n'importe aucune bibliothèque réseau."""
     root = root.expanduser().resolve()
     manifest_path = root / "model-manifest.json"
     if not manifest_path.is_file():
@@ -138,7 +138,7 @@ def validate_bundle(root: Path) -> dict[str, Any]:
     pipeline_relative = "TRELLIS-image-large/pipeline.json"
     if pipeline_relative not in files:
         raise ValueError(f"pipeline.json is absent from the offline inventory. {INSTALL_HINT}")
-    # Hash the config before trusting its paths.
+    # Calcule le hash de la configuration avant de faire confiance à ses chemins.
     config_path = inside(root, pipeline_relative)
     if not record_matches(config_path, files[pipeline_relative]):
         raise ValueError(f"Missing or damaged local file: {pipeline_relative}. {INSTALL_HINT}")
@@ -153,7 +153,7 @@ def validate_bundle(root: Path) -> dict[str, Any]:
     for relative, record in files.items():
         if not record_matches(inside(root, relative), record):
             raise ValueError(f"Missing or damaged local file: {relative}. {INSTALL_HINT}")
-    # Code added outside the recorded DINO revision should never be executed.
+    # Le code ajouté hors de la révision DINO enregistrée ne doit jamais être exécuté.
     code_root = root / "dinov2" / "repository"
     unexpected = [p for p in code_root.rglob("*.py") if p.relative_to(root).as_posix() not in files]
     if unexpected:
@@ -172,7 +172,7 @@ def _atomic_copy(source: Path, target: Path) -> None:
 
 
 def _download(url: str, target: Path) -> None:
-    """Download to .part first. An interrupted file is never marked complete."""
+    """Télécharge d'abord vers .part. Un fichier interrompu n'est jamais marqué comme terminé."""
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".part")
     received = 0
@@ -199,7 +199,7 @@ def _download(url: str, target: Path) -> None:
 
 
 def extract_dino_code(archive: Path, destination: Path) -> list[Path]:
-    """Extract the pinned source unchanged; ignore docs, datasets and pictures."""
+    """Extrait la source épinglée sans la modifier ; ignore la documentation, les jeux de données et les images."""
     prefix = f"dinov2-{DINO_REVISION}/"
     written: list[Path] = []
     with ZipFile(archive) as bundle:
@@ -268,8 +268,8 @@ def install_bundle(root: Path) -> None:
     def ready(relative: str) -> bool:
         return record_matches(inside(root, relative), records.get(relative))
 
-    # The default Hugging Face cache is intentionally preserved and reused.
-    # Copying completed files gives this project a self-contained model folder.
+    # Le cache Hugging Face par défaut est volontairement conservé et réutilisé.
+    # Copier les fichiers terminés fournit au projet un dossier de modèles autonome.
     from huggingface_hub import hf_hub_download
 
     def get_hf(filename: str) -> None:
@@ -296,7 +296,7 @@ def install_bundle(root: Path) -> None:
     if not code_ready:
         code_root = root / "dinov2/repository"
         if code_root.exists():
-            # Do not clobber unrelated files in an unknown directory.
+            # Ne pas écraser des fichiers sans rapport dans un répertoire inconnu.
             unknown = [p for p in code_root.rglob("*.py") if p.relative_to(root).as_posix() not in records]
             if unknown:
                 raise RuntimeError(f"Unmanaged DINOv2 code already exists: {unknown[0]}")

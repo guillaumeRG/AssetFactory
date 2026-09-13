@@ -1,4 +1,3 @@
-﻿# Dexter Policy
+﻿# Politique Dexter
 
-Dexter receives small, explicit, testable tasks with a constrained file scope.
-
+Dexter reçoit des tâches petites, explicites et testables, avec un périmètre de fichiers limité.

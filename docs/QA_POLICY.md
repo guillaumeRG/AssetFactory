@@ -1,4 +1,3 @@
-﻿# QA Policy
+﻿# Politique QA
 
-Technical QA is deterministic. Artistic validation remains human.
-
+La QA technique est déterministe. La validation artistique reste humaine.

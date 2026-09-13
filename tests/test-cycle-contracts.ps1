@@ -1,9 +1,9 @@
 ﻿[CmdletBinding()]
 param()
 
-# Execute the real orchestration in an isolated temporary project, replacing
-# ComfyUI, both 3D engines, Blender and Unreal with small PowerShell fixtures.
-# No GPU work, downloads, existing outputs or Unreal projects are touched.
+# Exécute l'orchestration réelle dans un projet temporaire isolé en remplaçant
+# ComfyUI, les deux moteurs 3D, Blender et Unreal par de petites simulations PowerShell.
+# Aucun calcul GPU, téléchargement, résultat existant ni projet Unreal n'est modifié.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $SourceRoot = Split-Path -Parent $PSScriptRoot
@@ -126,7 +126,7 @@ exit 0
 '@ | Set-Content -LiteralPath (Join-Path $Sandbox "tools\run-triposr.ps1") -Encoding UTF8
 
     @'
-# Unbound arguments intentionally simulate a native Blender command line.
+# Les arguments non liés simulent volontairement une ligne de commande Blender native.
 '{"name":"blender"}' | Add-Content -LiteralPath (Join-Path $env:AF_CYCLE_TEST_ROOT "calls.jsonl")
 if ($env:AF_CYCLE_TEST_FAILURE -eq "blender") { exit 8 }
 $values = @{}

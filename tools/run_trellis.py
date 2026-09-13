@@ -23,8 +23,8 @@ def _prepare_imports() -> tuple[Path, Path]:
     if not compat_root.is_dir():
         raise RuntimeError(f"Asset Factory TRELLIS compatibility layer is missing: {compat_root}")
 
-    # The compatibility directory must precede site-packages so TRELLIS resolves
-    # the project-owned xformers shim instead of a broken system/runtime wheel.
+    # Le répertoire de compatibilité doit précéder site-packages afin que TRELLIS utilise
+    # le shim xformers fourni par le projet plutôt qu'un wheel système/runtime défectueux.
     sys.path.insert(0, str(compat_root))
     sys.path.insert(1, str(trellis_root))
 
@@ -51,7 +51,7 @@ def _self_test() -> int:
     device = torch.device("cuda")
     dtype = torch.float16
 
-    # Unmasked path used by fixed-size serialized/windowed attention.
+    # Chemin sans masque utilisé par l'attention sérialisée/fenêtrée de taille fixe.
     q = torch.randn((2, 7, 4, 32), device=device, dtype=dtype)
     k = torch.randn((2, 7, 4, 32), device=device, dtype=dtype)
     v = torch.randn((2, 7, 4, 32), device=device, dtype=dtype)
@@ -61,7 +61,7 @@ def _self_test() -> int:
     ).transpose(1, 2)
     torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
 
-    # Block-diagonal path used when sparse sequences have different lengths.
+    # Chemin bloc-diagonal utilisé lorsque les séquences creuses ont des longueurs différentes.
     q_lens = [3, 5, 2]
     kv_lens = [4, 2, 6]
     q = torch.randn((1, sum(q_lens), 4, 32), device=device, dtype=dtype)
@@ -110,7 +110,7 @@ def _run(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Preserve the input image name; replace only its final extension.
+    # Conserve le nom de l'image d'entrée ; seule son extension finale est remplacée.
     output_glb = output_dir / (input_path.stem + ".glb")
 
     if not input_path.is_file():
@@ -131,10 +131,10 @@ def _run(args: argparse.Namespace) -> int:
     with Image.open(input_path) as source:
         image = source.copy()
 
-    # Only decode what GLB export needs. The official example also decodes a
-    # radiance field and renders three videos; omitting those paths reduces VRAM
-    # and work on the ~8 GiB Asset Factory target without changing the mesh/GS
-    # generation required by to_glb().
+    # Ne décode que ce qui est nécessaire à l'export GLB. L'exemple officiel décode aussi
+    # un champ de radiance et génère trois vidéos ; omettre ces chemins réduit la VRAM
+    # et le calcul sur la cible Asset Factory d'environ 8 Gio sans modifier la génération
+    # du maillage/GS requise par to_glb().
     outputs = pipeline.run(
         image,
         seed=args.seed,

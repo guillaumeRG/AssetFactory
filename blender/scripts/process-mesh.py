@@ -1,7 +1,8 @@
-"""Normalize an Asset Factory static mesh without changing the engine checkout.
+"""Normalise un maillage statique Asset Factory sans modifier le dépôt du moteur.
 
-Legacy OBJ -> OBJ + FBX arguments remain supported. TRELLIS uses GLB -> GLB,
-with embedded materials/textures and the same target-height/base-center policy.
+Les anciens arguments OBJ -> OBJ + FBX restent pris en charge. TRELLIS utilise
+GLB -> GLB, avec les matériaux/textures intégrés et la même politique de hauteur
+cible et de centrage de la base.
 """
 
 import argparse
@@ -51,7 +52,7 @@ def parse_args(argv=None):
 
 
 def read_glb_json(path):
-    """Validate the GLB envelope and read its JSON, without loading its images."""
+    """Valide l'enveloppe GLB et lit son JSON sans charger ses images."""
     path = Path(path)
     with path.open("rb") as handle:
         header = handle.read(12)
@@ -113,8 +114,8 @@ def get_scene_bounds(mesh_objects):
 
 
 def prepare_mesh_objects(mesh_objects, preserve_normals=False):
-    # GLB may contain transformed parents and instances. Capture every world
-    # matrix before detaching anything; copy shared geometry before baking it.
+    # Un GLB peut contenir des parents transformés et des instances. On capture
+    # chaque matrice monde avant tout détachement et on copie les géométries partagées avant de les appliquer.
     matrices = {obj: obj.matrix_world.copy() for obj in mesh_objects}
     for obj in mesh_objects:
         if obj.data.users > 1:
@@ -123,7 +124,7 @@ def prepare_mesh_objects(mesh_objects, preserve_normals=False):
         obj.data.transform(matrices[obj])
         obj.matrix_world = Matrix.Identity(4)
         if not preserve_normals:
-            # bmesh works in modern Blender; normals_make_consistent was removed.
+            # bmesh fonctionne dans les versions modernes de Blender ; normals_make_consistent a été supprimé.
             bm = bmesh.new()
             try:
                 bm.from_mesh(obj.data)
@@ -150,8 +151,8 @@ def normalize_meshes(mesh_objects, target_height, preserve_normals=False):
         Vector((-center_x, -center_y, -bounds["min_z"]))
     )
     for obj in mesh_objects:
-        # UVs/material slots are untouched. Every mesh origin remains the same
-        # global base center; a later combined import has a consistent pivot.
+        # Les UV et emplacements de matériaux restent inchangés. Chaque origine de maillage conserve
+        # le même centre global de base ; un import combiné ultérieur obtient ainsi un pivot cohérent.
         obj.data.transform(transform)
         obj.data.update()
         obj.matrix_world = Matrix.Identity(4)

@@ -3,11 +3,11 @@ param(
     [string]$InputPath
 )
 
-# AssetFactory root = parent of tools\
+# Racine d'AssetFactory = parent de tools\
 $AssetFactoryRoot = Split-Path -Parent $PSScriptRoot
 
 # ---------------------------------------------------------------------------
-# Resolve input path
+# Résolution du chemin d'entrée
 # ---------------------------------------------------------------------------
 
 if (Test-Path -LiteralPath $InputPath) {
@@ -25,7 +25,7 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# Validate TripoSR installation
+# Validation de l'installation TripoSR
 # ---------------------------------------------------------------------------
 
 $TripoSREngineDir = Join-Path -Path $AssetFactoryRoot -ChildPath "engines\triposr"
@@ -43,7 +43,7 @@ if (-not (Test-Path -LiteralPath $RunScriptPath)) {
 }
 
 # ---------------------------------------------------------------------------
-# Create AssetFactory job
+# Création du job Asset Factory
 # ---------------------------------------------------------------------------
 
 $JobId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
@@ -61,7 +61,7 @@ New-Item -ItemType Directory -Force -Path $GeneratedDir | Out-Null
 New-Item -ItemType Directory -Force -Path $MeshDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
-# Copy source image into the job
+# Copie de l'image source dans le job
 $InputFileName = Split-Path -Path $AbsInputPath -Leaf
 $JobInputPath = Join-Path -Path $InputDir -ChildPath $InputFileName
 
@@ -69,7 +69,7 @@ Copy-Item -LiteralPath $AbsInputPath -Destination $JobInputPath -Force
 
 $JobInputPath = (Resolve-Path -LiteralPath $JobInputPath).Path
 
-# TripoSR temporary/generated output stays inside the job
+# Les sorties temporaires/générées de TripoSR restent dans le job
 $TripoSROutputDir = Join-Path -Path $GeneratedDir -ChildPath "triposr"
 
 New-Item -ItemType Directory -Force -Path $TripoSROutputDir | Out-Null
@@ -106,7 +106,7 @@ $JobData |
     Set-Content -LiteralPath $JobJsonPath -Encoding UTF8
 
 # ---------------------------------------------------------------------------
-# Run TripoSR
+# Exécution de TripoSR
 # ---------------------------------------------------------------------------
 
 $OriginalLocation = Get-Location
@@ -118,7 +118,7 @@ try {
 
     & $PythonPath $RunScriptPath $JobInputPath --output-dir $TripoSROutputDir
 
-    # Capture immediately after Python execution
+    # Capture immédiatement après l'exécution de Python
     $ExitCode = $LASTEXITCODE
 
     if ($ExitCode -ne 0) {
@@ -154,7 +154,7 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
-# Finalize job metadata
+# Finalisation des métadonnées du job
 # ---------------------------------------------------------------------------
 
 $CompletedAt = (Get-Date).ToString("o")
@@ -187,7 +187,7 @@ $JobData |
 $JobJsonPath = (Resolve-Path -LiteralPath $JobJsonPath).Path
 
 # ---------------------------------------------------------------------------
-# Result
+# Résultat
 # ---------------------------------------------------------------------------
 
 if ($ExitCode -ne 0) {

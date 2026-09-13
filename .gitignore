@@ -15,7 +15,7 @@ cache/
 *.log
 *.tmp
 
-# Locally installed engines
+# Moteurs installés localement
 engines/triposr/
 engines/comfyui/
 

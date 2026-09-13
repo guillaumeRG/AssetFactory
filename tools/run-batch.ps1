@@ -34,7 +34,7 @@ $ErrorActionPreference = "Stop"
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot "pipeline-common.ps1")
 
-# Capture the caller's explicit choices before entering helper scopes.
+# Capture les choix explicites de l'appelant avant d'entrer dans les portées des fonctions utilitaires.
 $CommandOverrides = @{}
 foreach ($key in $PSBoundParameters.Keys) {
     $CommandOverrides[$key] = $PSBoundParameters[$key]
@@ -80,7 +80,7 @@ try {
         Assert-AFFile -Path $PipelineRunner -Label "Image-to-3D pipeline"
     }
 
-    # Validate every entry before doing any generation or Unreal write.
+    # Valide chaque entrée avant toute génération ou écriture dans Unreal.
     $SeenIds = @{}
     $Records = @()
     foreach ($Asset in $Assets) {
@@ -257,7 +257,7 @@ try {
             }
             $result = Invoke-AFCommand -Executable $PipelineRunner -LogPath $ActiveRecord.logPath -Parameters $parameters
 
-            # Always preserve partial results, especially when only import failed.
+            # Conserve toujours les résultats partiels, surtout lorsque seul l'import a échoué.
             if (Test-Path -LiteralPath $ActiveRecord.pipelineMetadataPath -PathType Leaf) {
                 $pipeline = Get-Content -LiteralPath $ActiveRecord.pipelineMetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 $ActiveRecord.pipelineId = $pipeline.pipelineId

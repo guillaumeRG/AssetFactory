@@ -1,7 +1,7 @@
-"""Asset Factory's local-only TRELLIS loader; no edits to upstream sources.
+"""Chargeur TRELLIS uniquement local d'Asset Factory ; aucune modification des sources amont.
 
-The Python audit guard below catches ordinary Python network attempts. It is
-not an operating-system firewall or a sandbox for arbitrary native libraries.
+La protection d'audit Python ci-dessous intercepte les tentatives réseau Python ordinaires.
+Ce n'est ni un pare-feu du système d'exploitation ni une sandbox pour des bibliothèques natives arbitraires.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ _GUARD_INSTALLED = False
 
 
 def configure_offline(models_dir: Path) -> None:
-    """Run before importing torch, Hugging Face, rembg or TRELLIS."""
+    """À exécuter avant d'importer torch, Hugging Face, rembg ou TRELLIS."""
     global _GUARD_INSTALLED
     for name in (
         "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE",
@@ -25,10 +25,10 @@ def configure_offline(models_dir: Path) -> None:
     ):
         os.environ[name] = "1"
     os.environ["U2NET_HOME"] = str(models_dir / "rembg")
-    # DINOv2 uses its supported PyTorch fallback; it must not mistake our
-    # limited TRELLIS-only xFormers shim for the full xFormers package.
+    # DINOv2 utilise son repli PyTorch pris en charge ; il ne doit pas confondre notre
+    # shim xFormers limité à TRELLIS avec le package xFormers complet.
     os.environ["XFORMERS_DISABLED"] = "1"
-    # Avoid creating Python bytecode inside third-party source directories.
+    # Évite de créer du bytecode Python dans les répertoires de sources tierces.
     sys.dont_write_bytecode = True
     if _GUARD_INSTALLED:
         return
@@ -54,12 +54,12 @@ def check_local_models(models_dir: Path) -> dict[str, Any]:
 
 
 def load_local_pipeline(models_dir: Path):
-    """Use upstream models/samplers/run(); change only model acquisition.
+    """Utilise les modèles/samplers/run() amont ; seule l'acquisition des modèles change.
 
-    Upstream from_pretrained is a static method that constructs its base class,
-    so overriding it through a subclass would not select a local DINO loader.
-    Instead we construct the documented pipeline using the same JSON arguments
-    and a subclass that only overrides _init_image_cond_model.
+    from_pretrained amont est une méthode statique qui construit sa classe de base ;
+    la surcharger via une sous-classe ne sélectionnerait donc pas un chargeur DINO local.
+    Nous construisons à la place le pipeline documenté avec les mêmes arguments JSON
+    et une sous-classe qui surcharge uniquement _init_image_cond_model.
     """
     import torch
     from torchvision import transforms
@@ -84,7 +84,7 @@ def load_local_pipeline(models_dir: Path):
             del weights
             encoder.eval()
             self.models["image_cond_model"] = encoder
-            # Same preprocessing transform as TRELLIS 442aa1e.
+            # Même transformation de prétraitement que TRELLIS 442aa1e.
             self.image_cond_model_transform = transforms.Compose([
                 transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
@@ -95,7 +95,7 @@ def load_local_pipeline(models_dir: Path):
     loaded_models = {}
     for key, relative in config["models"].items():
         base = model_root / relative
-        # No remote fallback like Pipeline.from_pretrained's broad except.
+        # Aucun repli distant comme dans le except large de Pipeline.from_pretrained.
         if not Path(str(base) + ".json").is_file() or not Path(str(base) + ".safetensors").is_file():
             raise FileNotFoundError(f"Incomplete local checkpoint: {base}")
         print(f"[INFO] Loading local {key}...", flush=True)

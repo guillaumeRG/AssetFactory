@@ -1,4 +1,3 @@
-﻿# Environment
+﻿# Environnement
 
-Record validated host tools and engine-specific environments here.
-
+Consigner ici les outils hôtes validés et les environnements propres à chaque moteur.

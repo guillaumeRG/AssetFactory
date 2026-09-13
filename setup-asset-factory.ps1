@@ -35,8 +35,8 @@ $RequiredDirs = @(
     "unreal"
 )
 
-# TripoSR engine configuration. The engine is installed locally under engines/triposr
-# and is intentionally isolated from the shared bootstrap Python.
+# Configuration du moteur TripoSR. Le moteur est installé localement sous engines/triposr
+# et est volontairement isolé du Python de bootstrap partagé.
 $TripoSrRepoUrl = "https://github.com/VAST-AI-Research/TripoSR"
 $TripoSrRoot = Join-Path $ProjectRoot "engines\triposr"
 $TripoSrVenv = Join-Path $TripoSrRoot ".venv"
@@ -45,12 +45,12 @@ $TripoSrRequirements = Join-Path $TripoSrRoot "requirements.txt"
 $TripoSrPreferredPythonVersions = @("3.11", "3.10")
 
 
-# TRELLIS v1 configuration.
+# Configuration de TRELLIS v1.
 #
-# AF-08A keeps an official TRELLIS checkout isolated under engines/trellis.
-# AF-08B adds a second Python 3.12 runtime venv so experimentation with modern
-# PyTorch/CUDA does not mutate ComfyUI, TripoSR, global Python or the initial
-# bootstrap venv.
+# AF-08A conserve un checkout officiel de TRELLIS isolé sous engines/trellis.
+# AF-08B ajoute un second environnement virtuel d'exécution Python 3.12 afin que les essais avec les versions modernes
+# de PyTorch/CUDA ne modifient ni ComfyUI, ni TripoSR, ni le Python global, ni
+# l'environnement virtuel de bootstrap initial.
 $TrellisRepoUrl = "https://github.com/microsoft/TRELLIS.git"
 $TrellisPinnedCommit = "442aa1e"
 $TrellisPinnedFlexiCubesCommit = "815e075a2a400d06c48d94c347674344ed6ae5c5"
@@ -64,9 +64,9 @@ $TrellisRuntimeVenv = Join-Path $TrellisRoot ".venv-runtime"
 $TrellisRuntimeVenvPython = Join-Path $TrellisRuntimeVenv "Scripts\python.exe"
 $TrellisRuntimePythonVersion = "3.12"
 
-# Official PyTorch wheels. CUDA 13 runtime libraries are provided by the wheel;
-# installing a CUDA 13 Toolkit globally is intentionally NOT required here.
-# The local CUDA Toolkit 12.8 remains untouched for existing engines.
+# Wheels PyTorch officiels. Les bibliothèques d'exécution CUDA 13 sont fournies par le wheel ;
+# l'installation globale d'un CUDA Toolkit 13 n'est volontairement PAS requise ici.
+# Le CUDA Toolkit 12.8 local reste inchangé pour les moteurs existants.
 $TrellisTorchVersion = "2.13.0"
 $TrellisTorchIndexUrl = "https://download.pytorch.org/whl/cu130"
 $TrellisExpectedTorchCuda = "13.0"
@@ -74,8 +74,8 @@ $TrellisExpectedTorchCuda = "13.0"
 $TrellisAttentionBackend = "sdpa"
 
 
-# AF-08C stage 2 native extension sources. These are kept inside the ignored
-# TRELLIS runtime tree so no third-party source checkout is committed.
+# Sources des extensions natives de l'étape 2 d'AF-08C. Elles restent dans l'arborescence
+# d'exécution TRELLIS ignorée afin qu'aucun checkout de source tiers ne soit versionné.
 $TrellisNativeExtensionsRoot = Join-Path $TrellisRoot ".asset-factory-extensions"
 $TrellisCummRepoUrl = "https://github.com/FindDefinition/cumm.git"
 $TrellisSpconvRepoUrl = "https://github.com/traveller59/spconv.git"
@@ -88,10 +88,10 @@ $TrellisKaolinRef = "v0.18.0"
 
 
 
-# Native TRELLIS CUDA extensions are deliberately not installed in v0.6.1.
-# Upstream's setup.sh does not support the modern Windows/PyTorch/CUDA matrix
-# we are targeting. We validate the runtime foundation first, then add pinned
-# open-source/precompiled native components one by one in AF-08C.
+# Les extensions CUDA natives de TRELLIS ne sont volontairement pas installées dans la v0.6.1.
+# Le setup.sh amont ne prend pas en charge la matrice moderne Windows/PyTorch/CUDA
+# que nous ciblons. Nous validons d'abord la base d'exécution, puis ajoutons un à un
+# les composants natifs open source/précompilés épinglés dans AF-08C.
 $TrellisBasicPackages = @(
     "pillow",
     "imageio",
@@ -113,7 +113,7 @@ $TrellisBasicPackages = @(
     "huggingface_hub"
 )
 
-# ComfyUI engine configuration. Runtime repository, venv and models stay local.
+# Configuration du moteur ComfyUI. Le dépôt d'exécution, l'environnement virtuel et les modèles restent locaux.
 $ComfyUiRepoUrl = "https://github.com/Comfy-Org/ComfyUI.git"
 $ComfyUiPinnedRef = "v0.35.0"
 $ComfyUiExpectedVersion = "0.35.0"
@@ -128,8 +128,8 @@ $ComfyUiExpectedTorchCuda = "13.0"
 $ComfyUiSmokeHost = "127.0.0.1"
 $ComfyUiSmokeTimeoutSeconds = 180
 
-# FLUX Schnell checkpoint used by the validated Asset Factory image workflow.
-# The model is intentionally not stored in Git because it is large runtime data.
+# Checkpoint FLUX Schnell utilisé par le workflow d'image Asset Factory validé.
+# Le modèle n'est volontairement pas stocké dans Git car il s'agit d'une donnée d'exécution volumineuse.
 $ComfyUiFluxRepoId = "Comfy-Org/flux1-schnell"
 $ComfyUiFluxFileName = "flux1-schnell-fp8.safetensors"
 $ComfyUiFluxModelsDir = Join-Path $ComfyUiRoot "models\checkpoints"
@@ -163,7 +163,7 @@ function Write-Result {
 }
 
 function Test-IsWindows {
-    # $IsWindows only exists in PowerShell Core. This also supports Windows PowerShell 5.1.
+    # $IsWindows n'existe que dans PowerShell Core. Cette méthode prend aussi en charge Windows PowerShell 5.1.
     return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 }
 
@@ -175,8 +175,8 @@ function Refresh-ProcessPath {
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
 
-    # Keep process-local PATH entries too; setup may itself have been launched from a
-    # shell that injected useful paths not persisted at User/Machine scope.
+    # Conserve aussi les entrées PATH locales au processus ; le setup a pu être lancé depuis un
+    # shell ayant injecté des chemins utiles non persistés aux niveaux Utilisateur/Machine.
     $allEntries = New-Object System.Collections.Generic.List[string]
     foreach ($rawPath in @($env:Path, $machinePath, $userPath)) {
         if ([string]::IsNullOrWhiteSpace($rawPath)) {
@@ -236,14 +236,14 @@ function Invoke-NativeCapture {
         [string]$WorkingDirectory = $null
     )
 
-    # Do not use PowerShell's `2>&1` here. On Windows PowerShell 5.1,
-    # stderr from a native executable can become a terminating
-    # NativeCommandError when $ErrorActionPreference = "Stop".
+    # Ne pas utiliser `2>&1` de PowerShell ici. Sous Windows PowerShell 5.1,
+    # stderr d'un exécutable natif peut devenir une NativeCommandError
+    # fatale lorsque $ErrorActionPreference = "Stop".
     #
-    # A non-zero native exit code is data for the caller to inspect,
-    # not a PowerShell exception. System.Diagnostics.Process gives us
-    # deterministic stdout/stderr capture on both Windows PowerShell
-    # 5.1 and PowerShell 7+.
+    # Un code de sortie natif non nul est une donnée que l'appelant doit examiner,
+    # pas une exception PowerShell. System.Diagnostics.Process fournit une capture
+    # déterministe de stdout/stderr aussi bien sous Windows PowerShell 5.1
+    # que sous PowerShell 7+.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Executable
     $psi.UseShellExecute = $false
@@ -258,8 +258,8 @@ function Invoke-NativeCapture {
         $psi.WorkingDirectory = $WorkingDirectory
     }
 
-    # ProcessStartInfo.ArgumentList is unavailable on .NET Framework used
-    # by Windows PowerShell 5.1, so build a correctly quoted argument string.
+    # ProcessStartInfo.ArgumentList n'est pas disponible dans le .NET Framework utilisé
+    # par Windows PowerShell 5.1 ; on construit donc une chaîne d'arguments correctement échappée.
     $quotedArgs = foreach ($arg in $Arguments) {
         if ($null -eq $arg) {
             '""'
@@ -272,9 +272,9 @@ function Invoke-NativeCapture {
             continue
         }
 
-        # Windows command-line quoting compatible with CommandLineToArgvW:
-        # escape backslashes that precede a quote, escape quotes, and double
-        # trailing backslashes before the closing quote.
+        # Échappement de ligne de commande Windows compatible avec CommandLineToArgvW :
+        # échappe les antislashs précédant un guillemet, échappe les guillemets et double
+        # les antislashs finaux avant le guillemet fermant.
         $escaped = [regex]::Replace($text, '(\\*)"', '$1$1\"')
         $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
         '"' + $escaped + '"'
@@ -290,8 +290,8 @@ function Invoke-NativeCapture {
             throw "Could not start native executable: $Executable"
         }
 
-        # Read both redirected streams asynchronously enough to avoid the
-        # classic full-buffer deadlock, then wait for process completion.
+        # Lit les deux flux redirigés de façon suffisamment asynchrone pour éviter
+        # le blocage classique dû à un tampon plein, puis attend la fin du processus.
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
@@ -327,9 +327,9 @@ function Test-Winget {
 function Get-GitInfo {
     $path = Get-ExecutablePath @("git.exe", "git")
 
-    # Native build environment setup can temporarily rewrite PATH. Git for
-    # Windows is normally installed in one of these stable locations, so probe
-    # them directly instead of treating PATH as the only source of truth.
+    # La configuration de l'environnement de compilation natif peut réécrire temporairement PATH. Git pour
+    # Windows est normalement installé dans l'un de ces emplacements stables ; on les teste donc
+    # directement au lieu de considérer PATH comme l'unique source de vérité.
     if (-not $path) {
         $candidates = @()
 
@@ -405,7 +405,7 @@ function Get-PythonInfo {
             continue
         }
 
-        # Ignore Windows Store aliases that can exist without a real Python installation.
+        # Ignore les alias du Windows Store qui peuvent exister sans véritable installation de Python.
         if ($path -match "WindowsApps") {
             continue
         }
@@ -633,13 +633,13 @@ function Ensure-GitIgnore {
 
 function Ensure-DocumentationSkeleton {
     $docs = @{
-        "PROJECT_OVERVIEW.md" = "# Asset Factory - Project Overview`r`n`r`nCanonical project context. Fill and evolve this document as decisions are validated.`r`n"
-        "ARCHITECTURE.md" = "# Asset Factory - Architecture`r`n`r`nKeep the architecture simple, testable, reproducible, modular, and replaceable.`r`n"
-        "V0_FUELTANK_T1.md" = "# V0 - FuelTank_T1`r`n`r`nProof of concept specification for the first Asset Factory pipeline.`r`n"
-        "DEVELOPMENT_POLICY.md" = "# Development Policy`r`n`r`nPrefer small, reversible changes. Do not add infrastructure outside the active milestone.`r`n"
-        "DEXTER_POLICY.md" = "# Dexter Policy`r`n`r`nDexter receives small, explicit, testable tasks with a constrained file scope.`r`n"
-        "ENVIRONMENT.md" = "# Environment`r`n`r`nRecord validated host tools and engine-specific environments here.`r`n"
-        "QA_POLICY.md" = "# QA Policy`r`n`r`nTechnical QA is deterministic. Artistic validation remains human.`r`n"
+        "PROJECT_OVERVIEW.md" = "# Asset Factory - Vue d'ensemble du projet`r`n`r`nContexte canonique du projet. Compléter et faire évoluer ce document à mesure que les décisions sont validées.`r`n"
+        "ARCHITECTURE.md" = "# Asset Factory - Architecture`r`n`r`nConserver une architecture simple, testable, reproductible, modulaire et remplaçable.`r`n"
+        "V0_FUELTANK_T1.md" = "# V0 - FuelTank_T1`r`n`r`nSpécification de preuve de concept pour le premier pipeline Asset Factory.`r`n"
+        "DEVELOPMENT_POLICY.md" = "# Politique de développement`r`n`r`nPrivilégier les modifications petites et réversibles. Ne pas ajouter d'infrastructure en dehors du jalon actif.`r`n"
+        "DEXTER_POLICY.md" = "# Politique Dexter`r`n`r`nDexter reçoit des tâches petites, explicites et testables, avec un périmètre de fichiers limité.`r`n"
+        "ENVIRONMENT.md" = "# Environnement`r`n`r`nConsigner ici les outils hôtes validés et les environnements propres à chaque moteur.`r`n"
+        "QA_POLICY.md" = "# Politique QA`r`n`r`nLa QA technique est déterministe. La validation artistique reste humaine.`r`n"
     }
 
     foreach ($name in $docs.Keys) {
@@ -692,7 +692,7 @@ function Ensure-GitRepository {
         throw "Could not initialize Git repository: $details"
     }
 
-    # Verify instead of assuming `git init` succeeded semantically.
+    # Vérifie le résultat au lieu de supposer que `git init` a réellement réussi.
     $verify = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $ProjectRoot, "rev-parse", "--is-inside-work-tree")
     if ($verify.ExitCode -ne 0) {
         throw "Git init returned success, but repository verification failed."
@@ -1081,9 +1081,9 @@ function Ensure-TripoSrRepository {
 }
 
 function Ensure-TripoSrVenv {
-    # Reuse an existing valid engine venv before looking for a base Python.
-    # This avoids reinstalling Python simply because the original interpreter
-    # is no longer on PATH after the venv has already been created.
+    # Réutilise un environnement virtuel moteur valide avant de rechercher un Python de base.
+    # Cela évite de réinstaller Python simplement parce que l'interpréteur d'origine
+    # n'est plus dans PATH alors que l'environnement virtuel a déjà été créé.
     if (Test-Path -LiteralPath $TripoSrVenvPython -PathType Leaf) {
         $versionResult = Invoke-NativeCapture -Executable $TripoSrVenvPython -Arguments @(
             "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
@@ -1138,9 +1138,9 @@ function Invoke-TripoSrPython {
         throw "TripoSR venv is missing. Run '.\\setup-asset-factory.ps1 triposr install'."
     }
 
-    # TripoSR is not installed as a site-package (the official repository has no
-    # setup.py/pyproject.toml). Python must therefore run with the repository root
-    # as its working directory so `import tsr` resolves the local `tsr` package.
+    # TripoSR n'est pas installé comme site-package (le dépôt officiel ne contient ni
+    # setup.py ni pyproject.toml). Python doit donc s'exécuter avec la racine du dépôt
+    # comme répertoire de travail afin que `import tsr` résolve le package local `tsr`.
     return Invoke-NativeCapture -Executable $TripoSrVenvPython -Arguments $Arguments -WorkingDirectory $TripoSrRoot
 }
 
@@ -1228,9 +1228,9 @@ print("tensor_cuda=OK")
 }
 
 function Ensure-TripoSrBuildDependencies {
-    # torchmcubes must build against the PyTorch already installed in this venv.
-    # Its upstream installation instructions require disabling PEP 517 build
-    # isolation and making the build tooling available in the active environment.
+    # torchmcubes doit être compilé avec le PyTorch déjà installé dans cet environnement virtuel.
+    # Ses instructions d'installation amont exigent de désactiver l'isolation de compilation PEP 517
+    # et de rendre les outils de compilation disponibles dans l'environnement actif.
     $result = Invoke-TripoSrPython -Arguments @(
         "-m", "pip", "install",
         "scikit-build-core",
@@ -1253,10 +1253,10 @@ function Ensure-TripoSrRequirements {
 
     Ensure-TripoSrBuildDependencies
 
-    # TripoSR requirements.txt contains torchmcubes directly from GitHub.
-    # torchmcubes dynamically inspects the installed PyTorch version while
-    # generating its metadata, so normal pip build isolation cannot work.
-    # --no-build-isolation is therefore required for the requirements install.
+    # Le requirements.txt de TripoSR contient torchmcubes directement depuis GitHub.
+    # torchmcubes inspecte dynamiquement la version de PyTorch installée lors de
+    # la génération de ses métadonnées ; l'isolation de compilation normale de pip ne peut donc pas fonctionner.
+    # --no-build-isolation est par conséquent requis pour installer les dépendances.
     $result = Invoke-TripoSrPython -Arguments @(
         "-m", "pip", "install",
         "--no-build-isolation",
@@ -1360,7 +1360,7 @@ function Invoke-TripoSrSmokeTest {
 
     Test-TripoSrCuda
 
-    # Smoke tests validate; they do not silently repair dependencies.
+    # Les smoke tests valident l'installation ; ils ne réparent pas silencieusement les dépendances.
     $onnx = Invoke-TripoSrPython -Arguments @("-c", "import rembg, onnxruntime; print(onnxruntime.__version__)")
     if ($onnx.ExitCode -ne 0) {
         throw "TripoSR rembg CPU backend is not ready. Run 'triposr install' or 'triposr repair'. Details: $($onnx.Output -join ' | ')"
@@ -1369,8 +1369,8 @@ function Invoke-TripoSrSmokeTest {
 
     Test-TripoSrImports
 
-    # Always use a unique output directory. Reusing outputs\triposr-smoke could
-    # allow an old mesh to make a broken inference look successful.
+    # Utilise toujours un répertoire de sortie unique. Réutiliser outputs\triposr-smoke pourrait
+    # permettre à un ancien maillage de faire passer à tort une inférence défaillante pour un succès.
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
     $outputDir = Join-Path $ProjectRoot "outputs\triposr-smoke\$stamp"
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
@@ -2299,14 +2299,14 @@ if errorlevel 1 exit /b %errorlevel%
 set
 "@ | Set-Content -LiteralPath $wrapper -Encoding ASCII
 
-    # IMPORTANT:
-    # Executing a .ps1 file shares the parent PowerShell process environment.
-    # Previous bootstrap runs can therefore leave large VS/CUDA variables behind.
-    # Starting vcvars64.bat with the inherited environment is not deterministic
-    # and eventually makes cmd.exe fail with "input line is too long".
+    # IMPORTANT :
+    # L'exécution d'un fichier .ps1 partage l'environnement du processus PowerShell parent.
+    # Des exécutions précédentes du bootstrap peuvent donc laisser de volumineuses variables VS/CUDA.
+    # Démarrer vcvars64.bat avec l'environnement hérité n'est pas déterministe
+    # et finit par faire échouer cmd.exe avec "input line is too long".
     #
-    # Launch vcvars in a genuinely clean child environment instead. Only the
-    # Windows variables required by cmd/vcvars are passed through.
+    # Lance plutôt vcvars dans un environnement enfant réellement propre. Seules les
+    # variables Windows requises par cmd/vcvars sont transmises.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $cmd
     $psi.Arguments = "/d /c `"$wrapper`""
@@ -2368,8 +2368,8 @@ set
         throw "Could not initialize VS2022 x64 developer environment: $detail"
     }
 
-    # Import only the native-build variables we actually need. Importing every
-    # variable emitted by `set` would unnecessarily mutate the caller's shell.
+    # Importe uniquement les variables de compilation native réellement nécessaires. Importer toutes les
+    # variables produites par `set` modifierait inutilement le shell de l'appelant.
     $allowed = @(
         "PATH", "INCLUDE", "LIB", "LIBPATH",
         "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsRedistDir",
@@ -2394,9 +2394,9 @@ set
         [System.Environment]::SetEnvironmentVariable($name, $data, "Process")
     }
 
-    # Restore the original caller PATH entries after the VS toolchain entries.
-    # This keeps Git/Python/winget discoverable without allowing an old VS
-    # installation to take precedence over the pinned VS2022 Build Tools.
+    # Restaure les entrées PATH d'origine de l'appelant après celles de la chaîne d'outils VS.
+    # Cela garde Git/Python/winget accessibles sans permettre à une ancienne installation VS
+    # de prendre la priorité sur les VS2022 Build Tools épinglés.
     $mergedPathEntries = New-Object System.Collections.Generic.List[string]
     foreach ($rawPath in @($env:Path, $originalPath)) {
         if ([string]::IsNullOrWhiteSpace($rawPath)) {
@@ -2465,7 +2465,7 @@ function Set-TrellisNativeBuildEnvironment {
         }
     }
 
-    # Blackwell RTX 50 uses compute capability 12.0.
+    # Les RTX 50 Blackwell utilisent la capacité de calcul 12.0.
     $env:TORCH_CUDA_ARCH_LIST = "12.0"
     $env:CUMM_CUDA_ARCH_LIST = "12.0"
     $env:SPCONV_ALGO = "native"
@@ -2473,13 +2473,13 @@ function Set-TrellisNativeBuildEnvironment {
     $env:PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
     $env:MAX_JOBS = "1"
 
-    # Keep the TRELLIS runtime hermetic. On Windows, Python user-site packages
-    # can otherwise shadow the editable cumm/spconv/pccm/ccimport packages in
-    # .venv-runtime and silently reintroduce stale CUDA/C++14 build defaults.
+    # Maintient l'environnement d'exécution TRELLIS hermétique. Sous Windows, les packages Python du site utilisateur
+    # peuvent sinon masquer les packages éditables cumm/spconv/pccm/ccimport de
+    # .venv-runtime et réintroduire silencieusement d'anciens réglages de compilation CUDA/C++14.
     $env:PYTHONNOUSERSITE = "1"
 
-    # CUDA 13.4 CCCL rejects MSVC's traditional preprocessor. Force the
-    # standards-conforming preprocessor for all native extension builds.
+    # CCCL de CUDA 13.4 rejette le préprocesseur traditionnel de MSVC. Force le
+    # préprocesseur conforme aux standards pour toutes les compilations d'extensions natives.
     $existingCl = $env:CL
     if ([string]::IsNullOrWhiteSpace($existingCl)) {
         $env:CL = "/Zc:preprocessor"
@@ -2750,8 +2750,8 @@ for path, replacements in targets:
     else:
         print(f"already:{path}")
 
-# Validate the effective defaults from source text because importing the
-# modules alone does not expose all function defaults reliably.
+# Valide les valeurs par défaut effectives à partir du texte source, car l'import des
+# modules seuls n'expose pas de manière fiable toutes les valeurs par défaut des fonctions.
 ccimport_core = targets[0][0].read_text(encoding="utf-8")
 pccm_pybind = targets[1][0].read_text(encoding="utf-8")
 
@@ -2790,11 +2790,11 @@ function Patch-TrellisCuda13Cpp17Tree {
         throw "$Label source directory is missing: $Root"
     }
 
-    # spconv/cumm currently generate native build files that may force C++14.
-    # CUDA 13.x requires the generated native path to use C++17 in this stack.
-    # Patch every textual source/build descriptor in the ignored local checkout,
-    # not only CMake files, because pccm/ccimport may emit the standard from
-    # Python templates and generated Ninja/CMake fragments.
+    # spconv/cumm génèrent actuellement des fichiers de compilation native pouvant forcer C++14.
+    # CUDA 13.x exige que le chemin natif généré utilise C++17 dans cette pile.
+    # Corrige chaque descripteur textuel de source/compilation dans le checkout local ignoré,
+    # pas seulement les fichiers CMake, car pccm/ccimport peut émettre le standard depuis
+    # des modèles Python et des fragments Ninja/CMake générés.
     $extensions = @(
         ".py", ".pyi", ".cmake", ".txt", ".in", ".ninja",
         ".cc", ".cpp", ".cxx", ".cu", ".h", ".hpp"
@@ -2834,9 +2834,9 @@ function Patch-TrellisCuda13Cpp17Tree {
                 }
             }
 
-            # Match the whitespace-tolerant declarations checked by
-            # Assert-TrellisNoCpp14BuildFlags (for example: std = "c++14").
-            # Preserve spacing and quotes; change only the standard version.
+            # Correspond aux déclarations tolérant les espaces contrôlées par
+            # Assert-TrellisNoCpp14BuildFlags (par exemple : std = "c++14").
+            # Conserve les espaces et les guillemets ; seule la version du standard est modifiée.
             $regexPairs = @(
                 @('(std\s*=\s*["'']c\+\+)14(["''])', '${1}17${2}'),
                 @('(std\s*=\s*["'']c\+\+17["'']\s+if\s+compat\.InMacOS\s+else\s+["'']c\+\+)14(["''])', '${1}17${2}'),
@@ -2857,7 +2857,7 @@ function Patch-TrellisCuda13Cpp17Tree {
                 $patchedFiles++
             }
         } catch {
-            # Binary/unreadable files are intentionally ignored.
+            # Les fichiers binaires ou illisibles sont volontairement ignorés.
         }
     }
 
@@ -2957,8 +2957,8 @@ function Reset-TrellisNativeBuildCache {
 function Patch-TrellisSpconvCompatibility {
     param([Parameter(Mandatory)][string]$Root)
 
-    # MSVC cannot open some generated headers at their default 260+ character
-    # paths. Use pccm's build_dir option; keep the resulting module in core_cc.
+    # MSVC ne peut pas ouvrir certains en-têtes générés dont les chemins dépassent 260 caractères.
+    # Utilise l'option build_dir de pccm ; conserve le module résultant dans core_cc.
     $buildRoot = Join-Path $ProjectRoot "outputs\spconv-build"
     $code = @'
 from pathlib import Path
@@ -2988,8 +2988,8 @@ ast.parse(updated)
 if updated != text:
     path.write_text(updated, encoding="utf-8")
 
-# CUDA 13's Thrust headers no longer include tuple.h transitively here.
-# Add it only to the template generating the two allocator sort kernels.
+# Les en-têtes Thrust de CUDA 13 n'incluent plus tuple.h transitivement ici.
+# L'ajoute uniquement au modèle qui génère les deux kernels de tri de l'allocateur.
 source = Path(sys.argv[1]) / "spconv" / "csrc" / "sparse" / "all.py"
 text = source.read_text(encoding="utf-8-sig")
 needle = ("def sort_1d_by_key_allocator_template(self, use_allocator: bool):\n"
@@ -3012,13 +3012,13 @@ print(build_root)
 }
 
 function Ensure-TrellisSpconv {
-    # Importing an editable spconv triggers JIT compilation. Patch before the
-    # first probe as well as after a fresh checkout, so reruns can reuse builds.
+    # L'import d'un spconv éditable déclenche une compilation JIT. Corrige avant le
+    # premier test ainsi qu'après un nouveau checkout afin que les relances puissent réutiliser les builds.
     $existingSpconv = Join-Path $TrellisNativeExtensionsRoot "spconv"
     if (Test-Path -LiteralPath (Join-Path $existingSpconv "spconv\build.py") -PathType Leaf) {
         Patch-TrellisSpconvCompatibility -Root $existingSpconv
-        # The reuse probe can regenerate cumm/spconv code too. Apply the same
-        # C++17 patches and guard before that JIT path, not only before pip.
+        # Le test de réutilisation peut lui aussi régénérer du code cumm/spconv. Applique les mêmes
+        # correctifs C++17 et la même protection avant ce chemin JIT, pas seulement avant pip.
         foreach ($name in @("cumm", "spconv")) {
             $sourceRoot = Join-Path $TrellisNativeExtensionsRoot $name
             if (Test-Path -LiteralPath $sourceRoot -PathType Container) {
@@ -3045,8 +3045,8 @@ function Ensure-TrellisSpconv {
     Ensure-TrellisNativeBuildPackages
     Patch-TrellisPccmCcimportCpp17
 
-    # Remove any old binary variants first. Upstream spconv explicitly warns
-    # against mixing spconv/cumm CUDA packages.
+    # Supprime d'abord les anciennes variantes binaires. Le projet spconv amont avertit explicitement
+    # qu'il ne faut pas mélanger les packages CUDA spconv/cumm.
     $uninstall = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments @(
         "-m", "pip", "uninstall", "-y",
         "spconv", "spconv-cu120", "spconv-cu121", "spconv-cu124", "spconv-cu126", "spconv-cu128", "spconv-cu130",
@@ -3060,23 +3060,23 @@ function Ensure-TrellisSpconv {
     $spconv = Ensure-TrellisExtensionRepository -Name "spconv" -Url $TrellisSpconvRepoUrl -Recursive
     Patch-TrellisSpconvCompatibility -Root $spconv
 
-    # Important: patch BOTH source trees before installing cumm. spconv's
-    # generated core_cc code imports templates/headers from cumm, so patching
-    # spconv alone leaves /std:c++14 in generated Windows build commands.
+    # Important : corrige les DEUX arborescences de sources avant d'installer cumm. Le code core_cc
+    # généré par spconv importe des modèles/en-têtes depuis cumm ; corriger uniquement spconv
+    # laisse donc /std:c++14 dans les commandes de compilation Windows générées.
     Patch-TrellisCuda13Cpp17Tree -Root $cumm -Label "cumm"
     Patch-TrellisCuda13Cpp17Tree -Root $spconv -Label "spconv"
     Assert-TrellisNoCpp14BuildFlags -Roots @($cumm, $spconv) -Label "cumm/spconv source trees"
 
-    # The previous failed attempt may already have generated core_cc/Ninja files
-    # containing /std:c++14. Remove only disposable build outputs so they are
-    # regenerated from the patched source trees.
+    # La tentative précédente ayant échoué peut déjà avoir généré des fichiers core_cc/Ninja
+    # contenant /std:c++14. Supprime uniquement les sorties de compilation jetables afin qu'elles soient
+    # régénérées à partir des arborescences de sources corrigées.
     Reset-TrellisNativeBuildCache -Root $cumm -Label "cumm"
     Reset-TrellisNativeBuildCache -Root $spconv -Label "spconv"
 
     Invoke-TrellisPipInstallPath -DisplayName "cumm (source)" -Path $cumm -Editable -NoDeps
 
-    # cumm installation can generate additional local build descriptors.
-    # Patch once more before spconv triggers its own pccm/ccimport generation.
+    # L'installation de cumm peut générer des descripteurs de compilation locaux supplémentaires.
+    # Corrige une nouvelle fois avant que spconv ne déclenche sa propre génération pccm/ccimport.
     Patch-TrellisCuda13Cpp17Tree -Root $cumm -Label "cumm"
     Patch-TrellisCuda13Cpp17Tree -Root $spconv -Label "spconv"
     Assert-TrellisNoCpp14BuildFlags -Roots @($cumm, $spconv) -Label "cumm/spconv regenerated trees"
@@ -3150,9 +3150,9 @@ function Ensure-TrellisMipGaussian {
 
 
 function Ensure-TrellisKaolinBuildPrerequisites {
-    # Kaolin v0.18.0 executes setup.py during metadata generation. Its setup.py
-    # imports pkg_resources, Cython and NumPy before the actual extension build,
-    # so all of them must already exist in the non-isolated TRELLIS runtime.
+    # Kaolin v0.18.0 exécute setup.py pendant la génération des métadonnées. Son setup.py
+    # importe pkg_resources, Cython et NumPy avant la compilation réelle de l'extension ;
+    # ils doivent donc tous être déjà présents dans l'environnement TRELLIS non isolé.
     $code = @'
 import sys
 
@@ -3223,9 +3223,9 @@ if errors:
 }
 
 function Ensure-TrellisKaolinRuntimeDependencies {
-    # We build Kaolin with --no-deps to prevent its old setup metadata from
-    # unexpectedly changing the validated PyTorch stack. Install the non-Torch
-    # runtime requirements explicitly instead.
+    # Nous compilons Kaolin avec --no-deps afin d'empêcher ses anciennes métadonnées de setup
+    # de modifier de manière inattendue la pile PyTorch validée. Installe explicitement à la place
+    # les dépendances d'exécution autres que Torch.
     if ($NoInstall) {
         return
     }
@@ -3267,9 +3267,9 @@ function Ensure-TrellisKaolin {
 
     $repo = Ensure-TrellisExtensionRepository -Name "kaolin" -Url $TrellisKaolinRepoUrl -Ref $TrellisKaolinRef -Recursive
 
-    # Kaolin v0.18 officially validates much older PyTorch releases than our
-    # isolated 2.13 runtime, but current source knows CUDA 13 and sm_120.
-    # Keep the override local to this install attempt and validate the import after.
+    # Kaolin v0.18 valide officiellement des versions de PyTorch bien plus anciennes que notre
+    # environnement isolé 2.13, mais la source actuelle connaît CUDA 13 et sm_120.
+    # Garde la surcharge locale à cette tentative d'installation et valide ensuite l'import.
     $oldIgnore = $env:IGNORE_TORCH_VER
     $env:IGNORE_TORCH_VER = "1"
     try {
@@ -3295,8 +3295,8 @@ function Ensure-TrellisNativeExtensionsStage2 {
     Set-TrellisNativeBuildEnvironment
     Ensure-TrellisNativeBuildPackages
 
-    # Install in dependency-risk order so failures are localized and reruns
-    # resume from already validated components.
+    # Installe dans l'ordre du risque de dépendance afin de localiser les échecs et de permettre aux relances
+    # de reprendre à partir des composants déjà validés.
     Ensure-TrellisNvdiffrast
     Ensure-TrellisDiffOctreeRast
     Ensure-TrellisMipGaussian
@@ -3764,7 +3764,7 @@ function Invoke-TrellisModelPreparation {
         Write-Result "INFO" "Existing cached model files will be reused when available. No native rebuild."
     }
 
-    # Stream download progress. Do not merge stderr through 2>&1 on PS 5.1.
+    # Affiche la progression du téléchargement en continu. Ne fusionne pas stderr via 2>&1 sous PS 5.1.
     $previousPreference = $ErrorActionPreference
     $exitCode = 1
     try {
@@ -3923,9 +3923,9 @@ function Ensure-ComfyUiRepository {
         throw "ComfyUI repository is incomplete or invalid: $($state.Message). Nothing was deleted."
     }
 
-    # Reproducibility: Asset Factory currently validates ComfyUI v0.35.0.
-    # Existing repositories are moved to the pinned release only when tracked
-    # files are clean. Runtime data such as models and .venv are not touched.
+    # Reproductibilité : Asset Factory valide actuellement ComfyUI v0.35.0.
+    # Les dépôts existants ne sont déplacés vers la version épinglée que lorsque les fichiers
+    # suivis sont propres. Les données d'exécution telles que les modèles et .venv ne sont pas modifiées.
     $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @(
         "-C", $ComfyUiRoot,
         "status", "--porcelain", "--untracked-files=no"
@@ -3988,9 +3988,9 @@ function Ensure-ComfyUiRepository {
 }
 
 function Ensure-ComfyUiVenv {
-    # Reuse an existing valid venv even if the base Python installation is no
-    # longer discoverable. A base interpreter is only required to create or
-    # recreate the venv.
+    # Réutilise un environnement virtuel valide existant même si l'installation Python de base n'est plus
+    # détectable. Un interpréteur de base n'est requis que pour créer ou
+    # recréer l'environnement virtuel.
     if (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf) {
         $versionResult = Invoke-NativeCapture -Executable $ComfyUiVenvPython -Arguments @(
             "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
@@ -4267,9 +4267,9 @@ function Ensure-ComfyUiRequirements {
         return
     }
 
-    # pip is idempotent here: already-satisfied requirements are reused. PyTorch
-    # was installed first from the CUDA 13.0 index, so the unpinned torch entries
-    # in requirements.txt remain satisfied instead of replacing the CUDA build.
+    # pip est idempotent ici : les dépendances déjà satisfaites sont réutilisées. PyTorch
+    # a d'abord été installé depuis l'index CUDA 13.0 ; les entrées torch non épinglées
+    # de requirements.txt restent donc satisfaites au lieu de remplacer le build CUDA.
     $result = Invoke-ComfyUiPython -Arguments @("-m", "pip", "install", "-r", $ComfyUiRequirements)
     if ($result.ExitCode -ne 0) {
         throw "ComfyUI requirements installation failed: $($result.Output -join ' | ')"
@@ -4673,8 +4673,8 @@ function Invoke-ComfyUiSmokeTest {
         throw "ComfyUI smoke test aborted because doctor failed."
     }
 
-    # Always use a dedicated free port so the smoke test never interferes with
-    # an already-running interactive ComfyUI instance on the normal port 8188.
+    # Utilise toujours un port libre dédié afin que le smoke test n'interfère jamais avec
+    # une instance interactive ComfyUI déjà active sur le port normal 8188.
     $smokePort = Get-FreeTcpPort
     $baseUrl = "http://$($ComfyUiSmokeHost):$smokePort"
     $healthUrl = "$baseUrl/system_stats"
@@ -4903,7 +4903,7 @@ function Invoke-Install {
         if ($NoInstall) {
             Write-Result "MISSING" "Python not installed"
         } else {
-            # Shared bootstrap Python only. Engine Python environments remain isolated and pinned separately.
+            # Uniquement le Python de bootstrap partagé. Les environnements Python des moteurs restent isolés et épinglés séparément.
             Install-WingetPackage -Id "Python.Python.3.12" -DisplayName "Python 3.12"
             Assert-DetectedAfterInstall -DisplayName "Python" -Detector { (Get-PythonInfo).Installed }
             $python = Get-PythonInfo

@@ -6,11 +6,11 @@ from typing import Iterable, Tuple
 
 @dataclass(frozen=True)
 class BlockDiagonalMask:
-    """Minimal replacement for xformers.ops.fmha.BlockDiagonalMask.
+    """Remplacement minimal de xformers.ops.fmha.BlockDiagonalMask.
 
-    TRELLIS uses only ``from_seqlens`` and passes the resulting object back to
-    ``memory_efficient_attention``.  We keep the sequence lengths and execute
-    each block independently with PyTorch SDPA, avoiding a large dense mask.
+    TRELLIS n'utilise que ``from_seqlens`` et retransmet l'objet résultant à
+    ``memory_efficient_attention``. Nous conservons les longueurs de séquence et exécutons
+    chaque bloc indépendamment avec PyTorch SDPA, ce qui évite un grand masque dense.
     """
 
     q_seqlen: Tuple[int, ...]

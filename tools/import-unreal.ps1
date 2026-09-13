@@ -231,12 +231,12 @@ $ImportSettings = [ordered]@{
     combineMeshes = $true
     generateLightmapUVs = $true
     autoGenerateCollision = $true
-    # GLB materials can have generic names; isolate each asset to avoid collisions.
+    # Les matériaux GLB peuvent avoir des noms génériques ; on isole chaque asset pour éviter les collisions.
     assetSubfolder = $IsGlb
 }
 
-# General settings remain compatible with TripoSR. Optional GLB-specific
-# overrides avoid changing the material/texture policy for existing FBX imports.
+# Les réglages généraux restent compatibles avec TripoSR. Les surcharges facultatives propres au GLB
+# évitent de modifier la politique de matériaux/textures des imports FBX existants.
 $settingsBlocks = @("import")
 if ($IsGlb) {
     $settingsBlocks += "importGlb"
@@ -275,7 +275,7 @@ $Job = [ordered]@{
     projectPath = $ProjectPath
     sourcePath = $ResolvedSourcePath
     sourceFormat = $SourceExtension.TrimStart(".")
-    # Preserve the legacy field for existing FBX consumers and saved jobs.
+    # Conserve le champ historique pour les consommateurs FBX existants et les jobs enregistrés.
     fbxPath = $(if (-not $IsGlb) { $ResolvedSourcePath } else { $null })
     assetId = $AssetId
     category = $Category

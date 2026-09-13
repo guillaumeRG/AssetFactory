@@ -1,4 +1,3 @@
-﻿# Development Policy
+﻿# Politique de développement
 
-Prefer small, reversible changes. Do not add infrastructure outside the active milestone.
-
+Privilégier les modifications petites et réversibles. Ne pas ajouter d'infrastructure en dehors du jalon actif.

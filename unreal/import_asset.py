@@ -89,7 +89,7 @@ def make_fbx_options(settings):
 
 
 def require_set(obj, property_name, value):
-    """Do not silently ignore a requested GLB import option."""
+    """N'ignore pas silencieusement une option d'import GLB demandée."""
     try:
         obj.set_editor_property(property_name, value)
     except Exception as exc:
@@ -99,7 +99,7 @@ def require_set(obj, property_name, value):
 
 
 def make_glb_options(settings, asset_id):
-    """Transient Interchange pipelines: no .uasset pipeline or engine edit."""
+    """Pipelines Interchange transitoires : aucun pipeline .uasset ni modification du moteur."""
     required_classes = (
         "InterchangeGenericAssetsPipeline",
         "InterchangeGLTFPipeline",
@@ -113,7 +113,7 @@ def make_glb_options(settings, asset_id):
             )
 
     pipeline = unreal.InterchangeGenericAssetsPipeline()
-    # AssetImportTask.destination_name is ignored for Interchange imports.
+    # AssetImportTask.destination_name est ignoré pour les imports Interchange.
     require_set(pipeline, "asset_name", asset_id)
     require_set(pipeline, "use_source_name_for_asset", True)
     require_set(pipeline, "asset_type_sub_folders", False)
@@ -123,7 +123,7 @@ def make_glb_options(settings, asset_id):
     require_set(mesh, "import_static_meshes", True)
     require_set(mesh, "import_skeletal_meshes", False)
     combine = bool(settings.get("combineMeshes", True))
-    # UE 5.8 replaced the old combine_static_meshes boolean with an enum.
+    # UE 5.8 a remplacé l'ancien booléen combine_static_meshes par une énumération.
     behavior = getattr(unreal, "InterchangeCombineStaticMeshesBehavior", None)
     if behavior is not None:
         value = behavior.ALL if combine else behavior.DO_NOT_COMBINE
@@ -139,7 +139,7 @@ def make_glb_options(settings, asset_id):
     require_set(animation, "import_animations", False)
     material = pipeline.get_editor_property("material_pipeline")
     require_set(material, "import_materials", bool(settings.get("importMaterials", True)))
-    # Search only the chosen destination, not other assets with material_0 names.
+    # Recherche uniquement dans la destination choisie, pas dans d'autres assets nommés material_0.
     if hasattr(unreal, "InterchangeMaterialSearchLocation"):
         require_set(
             material, "search_location", unreal.InterchangeMaterialSearchLocation.LOCAL
@@ -151,8 +151,8 @@ def make_glb_options(settings, asset_id):
     stack = unreal.InterchangePipelineStackOverride()
     stack.add_pipeline(pipeline)
     stack.add_pipeline(gltf_pipeline)
-    # SoftObjectPath entries do not own transient pipelines; retain them until
-    # the synchronous import is finished and every returned asset is saved.
+    # Les entrées SoftObjectPath ne possèdent pas les pipelines transitoires ; on les conserve jusqu'à
+    # la fin de l'import synchrone et jusqu'à ce que chaque asset retourné soit enregistré.
     return stack, (pipeline, gltf_pipeline)
 
 
@@ -179,7 +179,7 @@ def validate_content_root(value):
 
 
 def collect_imported_objects(task):
-    # get_objects waits for an asynchronous Interchange result if necessary.
+    # get_objects attend le résultat Interchange asynchrone si nécessaire.
     objects = list(task.get_objects() or [])
     objects_by_path = {
         str(obj.get_path_name()): obj for obj in objects if obj is not None

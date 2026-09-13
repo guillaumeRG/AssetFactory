@@ -1,6 +1,6 @@
-"""Naming regressions. Inference/export are mocked: no GPU or downloads.
+"""Régressions de nommage. L'inférence et l'export sont simulés : sans GPU ni téléchargement.
 
-Run from the project root:
+À exécuter depuis la racine du projet :
     python -B -m unittest discover -s tests -p test_trellis_output_names.py -v
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ import run_trellis as runner
 
 class OutputNameTests(unittest.TestCase):
     def run_mocked_generation(self, filename, *, save_ply=False, write_glb=True):
-        """Exercise the actual _run function with fake model and export APIs."""
+        """Exerce la véritable fonction _run avec de fausses API de modèle et d'export."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_path = root / filename

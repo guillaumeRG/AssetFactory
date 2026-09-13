@@ -1,4 +1,4 @@
-"""Importer contract tests with a strict mock of Unreal (no editor/GPU needed)."""
+"""Tests de contrat de l'importeur avec un mock strict d'Unreal (éditeur/GPU non requis)."""
 import importlib.util
 import json
 import os

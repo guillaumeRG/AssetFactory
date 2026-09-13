@@ -1,4 +1,3 @@
 ﻿# Asset Factory - Architecture
 
-Keep the architecture simple, testable, reproducible, modular, and replaceable.
-
+Conserver une architecture simple, testable, reproductible, modulaire et remplaçable.

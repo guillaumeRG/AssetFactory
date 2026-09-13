@@ -35,14 +35,14 @@ $AssetFactoryRoot = [System.IO.Path]::GetFullPath(
 
 $ServerUrl = $ServerUrl.TrimEnd("/")
 
-# Expected nodes in the reference ComfyUI API workflow.
+# Nœuds attendus dans le workflow API ComfyUI de référence.
 $PositivePromptNodeId = "2"
 $NegativePromptNodeId = "3"
 $SamplerNodeId = "5"
 $SaveImageNodeId = "7"
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Fonctions utilitaires
 # -----------------------------------------------------------------------------
 
 function Write-Info {
@@ -153,7 +153,7 @@ function Get-ComfyUiErrorMessage {
 }
 
 # -----------------------------------------------------------------------------
-# Startup information
+# Informations de démarrage
 # -----------------------------------------------------------------------------
 
 Write-Info "AssetFactory root: $AssetFactoryRoot"
@@ -161,7 +161,7 @@ Write-Info "Prompt: $Prompt"
 Write-Info "Seed: $Seed"
 
 # -----------------------------------------------------------------------------
-# Resolve and validate workflow
+# Résolution et validation du workflow
 # -----------------------------------------------------------------------------
 
 try {
@@ -186,7 +186,7 @@ if (-not (Test-Path -LiteralPath $ResolvedWorkflowPath -PathType Leaf)) {
 Write-Ok "Workflow found: $ResolvedWorkflowPath"
 
 # -----------------------------------------------------------------------------
-# Validate ComfyUI API
+# Validation de l'API ComfyUI
 # -----------------------------------------------------------------------------
 
 $SystemStatsUrl = "$ServerUrl/system_stats"
@@ -205,7 +205,7 @@ try {
 }
 
 # -----------------------------------------------------------------------------
-# Load and validate workflow JSON
+# Chargement et validation du workflow JSON
 # -----------------------------------------------------------------------------
 
 try {
@@ -228,7 +228,7 @@ try {
 }
 
 # -----------------------------------------------------------------------------
-# Create job identity and customize workflow
+# Création de l'identité du job et personnalisation du workflow
 # -----------------------------------------------------------------------------
 
 $JobsRoot = Join-Path $AssetFactoryRoot "outputs\jobs"
@@ -248,7 +248,7 @@ Write-Ok "Workflow loaded and customized"
 Write-Info "JobId: $JobId"
 
 # -----------------------------------------------------------------------------
-# Create job directories and initial metadata
+# Création des répertoires du job et des métadonnées initiales
 # -----------------------------------------------------------------------------
 
 $JobRoot = Join-Path $JobsRoot $JobId
@@ -301,17 +301,17 @@ Write-Ok "Resolved workflow saved: $ResolvedWorkflowOutput"
 Write-Ok "Metadata created: $JobMetadataPath"
 
 # -----------------------------------------------------------------------------
-# Execute job
+# Exécution du job
 # -----------------------------------------------------------------------------
 
 try {
-    # Submit workflow.
+    # Soumet le workflow.
     $PromptUrl = "$ServerUrl/prompt"
     $RequestJson = @{
         prompt = $Workflow
     } | ConvertTo-Json -Depth 100
 
-    # Explicit UTF-8 bytes avoid Windows PowerShell 5.1 text encoding surprises.
+    # Des octets UTF-8 explicites évitent les surprises d'encodage de texte sous Windows PowerShell 5.1.
     $RequestBody = [System.Text.Encoding]::UTF8.GetBytes($RequestJson)
 
     $QueueResponse = Invoke-RestMethod `
@@ -337,7 +337,7 @@ try {
     Write-Ok "Workflow submitted to ComfyUI"
     Write-Info "PromptId: $PromptId"
 
-    # Wait for completion.
+    # Attend la fin de l'exécution.
     $HistoryUrl = "$ServerUrl/history/$PromptId"
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $HistoryEntry = $null
@@ -374,7 +374,7 @@ try {
         throw "Timeout after $TimeoutSeconds seconds waiting for ComfyUI generation."
     }
 
-    # ComfyUI history can contain a completed history entry even when execution failed.
+    # L'historique ComfyUI peut contenir une entrée marquée terminée même si l'exécution a échoué.
     if ($HistoryEntry.PSObject.Properties.Name -contains "status") {
         $status = $HistoryEntry.status
 
@@ -387,7 +387,7 @@ try {
 
     Write-Ok "ComfyUI generation completed"
 
-    # Validate SaveImage outputs.
+    # Valide les sorties SaveImage.
     if (-not ($HistoryEntry.PSObject.Properties.Name -contains "outputs")) {
         throw "ComfyUI history does not contain outputs."
     }
@@ -412,8 +412,8 @@ try {
         throw "Generated image list is empty."
     }
 
-    # Retrieve every generated image through ComfyUI's /view endpoint.
-    # This avoids coupling the runner to ComfyUI's physical output directory.
+    # Récupère chaque image générée via le point d'accès /view de ComfyUI.
+    # Cela évite de coupler le runner au répertoire physique de sortie de ComfyUI.
     $DestinationImagePaths = New-Object System.Collections.Generic.List[string]
     $imageIndex = 0
 
@@ -478,7 +478,7 @@ try {
         throw "No generated image could be recovered."
     }
 
-    # Finalize metadata.
+    # Finalise les métadonnées.
     $JobMetadata["status"] = "completed"
     $JobMetadata["completedAt"] = (Get-Date).ToString("o")
     $JobMetadata["imageCount"] = $DestinationImagePaths.Count

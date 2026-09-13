@@ -96,7 +96,7 @@ $Stage = $null
 $ExitCode = 1
 
 try {
-    # Validate prerequisites before submitting an image or starting a GPU model.
+    # Valide les prérequis avant de soumettre une image ou de démarrer un modèle GPU.
     Assert-AFFile -Path $GeometryRunner -Label "$Engine runner"
     Assert-AFFile -Path $BlenderScript -Label "Blender processing script"
     $BlenderExe = Get-BlenderExecutable
@@ -125,7 +125,7 @@ try {
         -Root $AssetFactoryRoot -ProjectProfile $ProjectProfile `
         -AutoImport $AutoImport -AssetId $AssetId -Category $Category
 
-    # A second full pipeline must not start another GPU workload concurrently.
+    # Un second pipeline complet ne doit pas démarrer simultanément une autre charge GPU.
     $OutputsRoot = Join-Path $AssetFactoryRoot "outputs"
     New-Item -ItemType Directory -Path $OutputsRoot -Force | Out-Null
     try {
@@ -236,7 +236,7 @@ try {
     Write-AFInfo "Pipeline: $PipelineId / engine: $Engine / asset: $AssetId"
     Write-AFInfo "Metadata: $PipelineMetadataPath"
 
-    # 1. Acquire an image, then copy it under the asset's stable name.
+    # 1. Obtient une image puis la copie sous le nom stable de l'asset.
     $Stage = "comfyui"
     if (-not $UseExistingImage) {
         $PipelineMetadata.comfyui.status = "running"
@@ -268,7 +268,7 @@ try {
     Save-AFJson $PipelineMetadata $PipelineMetadataPath
     Write-AFOk "Image: $ImagePath"
 
-    # 2. Release ComfyUI's model memory before either 3D engine starts.
+    # 2. Libère la mémoire des modèles ComfyUI avant le démarrage de l'un des moteurs 3D.
     $Stage = "gpuHandoff"
     if (-not $UseExistingImage -and $ReleaseComfyMemory) {
         $PipelineMetadata.gpuHandoff.status = "running"
@@ -283,7 +283,7 @@ try {
     }
     Save-AFJson $PipelineMetadata $PipelineMetadataPath
 
-    # 3. Generate with exactly one selected engine. Never fall back silently.
+    # 3. Génère avec un seul moteur sélectionné. Aucun basculement silencieux vers l'autre moteur.
     $Stage = "geometry"
     $GeometryStage.status = "running"
     $GeometryStage.logPath = Join-Path $PipelineLogsDir "$Engine.log"
@@ -317,7 +317,7 @@ try {
     $GeometryStage.status = "completed"
     Save-AFJson $PipelineMetadata $PipelineMetadataPath
 
-    # 4. Keep textured GLB for TRELLIS; preserve OBJ + FBX for TripoSR.
+    # 4. Conserve le GLB texturé pour TRELLIS ; conserve OBJ + FBX pour TripoSR.
     $Stage = "blender"
     $PipelineMetadata.blender.status = "running"
     $PipelineMetadata.blender.inputMeshPath = $MeshPath
@@ -359,7 +359,7 @@ try {
     $PipelineMetadata.importSourcePath = $ImportSourcePath
     Save-AFJson $PipelineMetadata $PipelineMetadataPath
 
-    # 5. Import exactly once, after normalization and after the GPU process exits.
+    # 5. Importe une seule fois, après la normalisation et après l'arrêt du processus GPU.
     $Stage = "unreal"
     $PipelineMetadata.unreal.sourcePath = $ImportSourcePath
     if ($UnrealConfig.autoImport) {

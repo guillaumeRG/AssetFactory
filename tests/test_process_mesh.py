@@ -1,4 +1,4 @@
-"""Unit tests with a simulated Blender API; no engine/GPU downloads or writes."""
+"""Tests unitaires avec une API Blender simulée ; aucun téléchargement ni écriture moteur/GPU."""
 import contextlib
 import importlib.util
 import io

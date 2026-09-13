@@ -1,4 +1,4 @@
-"""Static contracts only: these do not execute PowerShell/ComfyUI/Blender/Unreal."""
+"""Contrats statiques uniquement : ils n'exécutent ni PowerShell, ni ComfyUI, ni Blender, ni Unreal."""
 import json
 from pathlib import Path
 import re

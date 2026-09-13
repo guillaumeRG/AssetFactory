@@ -1,4 +1,3 @@
-﻿# Asset Factory - Project Overview
+﻿# Asset Factory - Vue d'ensemble du projet
 
-Canonical project context. Fill and evolve this document as decisions are validated.
-
+Contexte canonique du projet. Compléter et faire évoluer ce document à mesure que les décisions sont validées.
