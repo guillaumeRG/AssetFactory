@@ -21,6 +21,26 @@ Le moteur peut être choisi à chaque génération avec `-Engine trellis` ou `-E
 
 ---
 
+
+## Aperçu rapide
+
+Exemple de résultat obtenu avec la chaîne complète : image de référence -> asset 3D généré -> import dans Unreal Engine.
+
+> Placez les images de démonstration dans `docs/images/` avec les noms indiqués ci-dessous pour afficher cet aperçu dans le dépôt.
+
+<table>
+  <tr>
+    <td align="center"><strong>Image de référence</strong></td>
+    <td align="center"><strong>Asset importé dans Unreal Engine</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/demo-chair-reference.png" alt="Chaise de référence" width="260"></td>
+    <td align="center"><img src="docs/images/demo-chair-unreal.png" alt="Chaise générée et importée dans Unreal Engine" width="260"></td>
+  </tr>
+</table>
+
+---
+
 ## 1. Prérequis
 
 Le bootstrap cible actuellement **Windows** avec :
