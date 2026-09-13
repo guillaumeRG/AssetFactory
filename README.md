@@ -50,8 +50,6 @@ Le bootstrap cible actuellement **Windows** avec :
 - Blender pour la normalisation des meshes ;
 - Unreal Engine uniquement si l'import automatique est utilisé.
 
-Les moteurs, modèles IA et environnements Python sont installés localement et ne sont pas versionnés dans Git.
-
 ---
 
 ## 2. Installation rapide
@@ -157,8 +155,6 @@ Le GLB final est placé sous :
 outputs\pipelines\<pipeline-id>\processed\StorageTank_01.glb
 ```
 
-Le nom du fichier 3D reprend le nom de l'asset / du PNG.
-
 ### Avec TripoSR
 
 ```powershell
@@ -182,8 +178,6 @@ Prompt
 ```
 
 Si `-Engine` n'est pas renseigné, **TripoSR reste le moteur par défaut** pour conserver la compatibilité avec les anciennes commandes.
-
-Il n'y a pas de basculement automatique vers l'autre moteur en cas d'erreur.
 
 ---
 
@@ -247,8 +241,6 @@ Dans ce cas :
 3. rouvrir le projet.
 
 Les assets importés apparaîtront alors dans le Content Browser.
-
-Il n'est pas nécessaire de régénérer le modèle 3D pour refaire uniquement l'import.
 
 ---
 
@@ -377,8 +369,6 @@ Pour vérifier leur présence :
 .\setup-asset-factory.ps1 trellis model-status
 ```
 
-Le but est que la génération courante ne dépende pas d'un téléchargement de modèles à chaque exécution.
-
 ---
 
 ## 12. Vérifications utiles
@@ -454,24 +444,3 @@ AssetFactory/
 Les dossiers contenant les moteurs, modèles lourds et sorties de génération doivent rester hors Git lorsqu'ils sont déjà couverts par les règles du dépôt.
 
 ---
-
-## 14. Philosophie du projet
-
-Asset Factory doit rester un **générateur d'assets générique**.
-
-Aucune règle métier, artistique ou technique propre à un jeu donné ne doit être codée en dur dans son cœur.
-
-Les particularités d'un projet consommateur doivent être décrites dans des profils ou manifestes :
-
-```text
-chemin du projet de destination
-répertoire d'import
-catégorie d'asset
-hauteur cible
-nomenclature
-matériaux / textures
-format de sortie
-règles d'import
-```
-
-Le même dépôt Asset Factory doit donc pouvoir produire des assets pour plusieurs projets sans modification de son code central.
