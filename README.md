@@ -26,8 +26,6 @@ Le moteur peut être choisi à chaque génération avec `-Engine trellis` ou `-E
 
 Exemple de résultat obtenu avec la chaîne complète : image de référence -> asset 3D généré -> import dans Unreal Engine.
 
-> Placez les images de démonstration dans `docs/images/` avec les noms indiqués ci-dessous pour afficher cet aperçu dans le dépôt.
-
 <table>
   <tr>
     <td align="center"><strong>Image de référence</strong></td>
