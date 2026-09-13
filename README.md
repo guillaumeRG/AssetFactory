@@ -1,30 +1,25 @@
-﻿# Asset Factory V0.7
+﻿# Asset Factory V0.8
 
-Asset Factory est une chaîne de génération et de préparation locale d'assets 3D à partir d'un prompt texte.
-
-Le but est simple :
+Asset Factory génère et prépare localement des assets 3D à partir d'un prompt texte ou d'une image.
 
 ```text
 Prompt
-  -> image générée par prompt
+  -> image
   -> génération 3D
-  -> normalisation dans Blender
-  -> import optionnel dans Unreal Engine
+  -> normalisation Blender
+  -> import Unreal optionnel
 ```
 
-Deux moteurs image-vers-3D sont pris en charge :
+Moteurs 3D pris en charge :
 
-- **TRELLIS** : génère un GLB texturé ;
-- **TripoSR** : génère un mesh 3D plus simple et rapide.
+- **TRELLIS**
+- **TripoSR**
 
-Le moteur peut être choisi à chaque génération avec `-Engine trellis` ou `-Engine triposr`.
+La génération multi-vues avec **Zero123++** est optionnelle.
 
 ---
 
-
-## Aperçu rapide
-
-Exemples de résultats obtenu avec la chaîne complète/partiel d'Asset Factory V0.7: prompt -> image de référence -> asset 3D généré -> import dans Unreal Engine.
+## Aperçu
 
 <table>
   <tr>
@@ -46,60 +41,36 @@ Exemples de résultats obtenu avec la chaîne complète/partiel d'Asset Factory 
 
 ---
 
-## 1. Prérequis
+## Prérequis
 
-Le bootstrap cible actuellement **Windows** avec :
-
-- Windows PowerShell 5.1+ ou PowerShell 7+ ;
-- un GPU compatible CUDA recommandé ;
-- Blender pour la normalisation des meshes ;
-- Unreal Engine uniquement si l'import automatique est utilisé.
+- Windows PowerShell 5.1+ ou PowerShell 7+
+- GPU CUDA recommandé
+- Blender
+- Unreal Engine uniquement pour l'import automatique
 
 ---
 
-## 2. Installation rapide
-
-Cloner le dépôt :
+## Installation
 
 ```powershell
 git clone https://github.com/guillaumeRG/AssetFactory.git
 Set-Location .\AssetFactory
-```
 
-Installer ou détecter les outils communs :
-
-```powershell
 .\setup-asset-factory.ps1 install
-```
 
-Installer ComfyUI et son modèle d'image :
-
-```powershell
 .\setup-asset-factory.ps1 comfyui install
 .\setup-asset-factory.ps1 comfyui model-install
-```
 
-Installer TripoSR si ce moteur doit être utilisé :
-
-```powershell
 .\setup-asset-factory.ps1 triposr install
-```
 
-Installer TRELLIS si ce moteur doit être utilisé :
-
-```powershell
 .\setup-asset-factory.ps1 trellis runtime-install
 .\setup-asset-factory.ps1 trellis model-install
-```
 
-Installer la génération multi-vues si elle doit être utilisée :
-
-```powershell
 .\setup-asset-factory.ps1 multiview install -Method zero123plus-v1.1
 .\setup-asset-factory.ps1 multiview model-install -Method zero123plus-v1.1
 ```
 
-Vérifier l'installation :
+Vérification :
 
 ```powershell
 .\setup-asset-factory.ps1 status
@@ -108,352 +79,255 @@ Vérifier l'installation :
 
 ---
 
-## 3. Démarrer ComfyUI
-
-Le serveur ComfyUI doit être lancé avant une génération complète.
-
-Depuis la racine d'Asset Factory :
+## Démarrer ComfyUI
 
 ```powershell
 Set-Location .\engines\comfyui
 .\.venv\Scripts\python.exe .\main.py --lowvram --listen 127.0.0.1 --port 8188
 ```
 
-Laisser ce terminal ouvert.
-
-L'interface et l'API sont ensuite disponibles sur :
-
-```text
-http://127.0.0.1:8188
-```
-
-Revenir dans un autre terminal à la racine du dépôt :
-
-```powershell
-Set-Location <chemin-vers-AssetFactory>
-```
+Puis revenir dans un second terminal à la racine d'Asset Factory.
 
 ---
 
-## 4. Générer un asset 3D
+# Utilisation
 
-### Avec TRELLIS
+Asset Factory expose trois commandes principales.
+
+## 1. Générer une image depuis un prompt
+
+Une seule image :
 
 ```powershell
-.\tools\run-image-to-3d.ps1 `
+.\tools\generate-image.ps1 `
     -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
-    -AssetId "StorageTank_01" `
-    -TargetHeight 1.5 `
-    -Engine trellis
-```
-
-Le cycle est :
-
-```text
-Prompt
-  -> ComfyUI
-  -> PNG
-  -> TRELLIS
-  -> GLB texturé
-  -> Blender
-  -> GLB normalisé
-```
-
-Le GLB final est placé dans la génération de l'asset sous `final/`.
-
-### Avec TRELLIS multi-vues
-
-Le même point d'entrée peut exécuter toute la chaîne multi-vues jusqu'à Blender et à l'import Unreal optionnel :
-
-```powershell
-.\tools\run-image-to-3d.ps1 `
-    -Mode multiview `
-    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
-    -AssetId "StorageTank_MV_01" `
-    -ReferenceCandidates 8 `
-    -ReferencePreset "multiview-rigid" `
-    -TargetHeight 1.5
-```
-
-Le cycle devient :
-
-```text
-Prompt
-  -> ComfyUI / FLUX
-  -> sélection d'une image de référence
-  -> génération multi-vues
-  -> sélection des vues
-  -> TRELLIS multi-image
-  -> Blender
-  -> GLB normalisé
-  -> import Unreal optionnel
-```
-
-`run-multiview.ps1` et `run-multiview-to-3d.ps1` restent disponibles séparément pour le debug et les reprises ciblées.
-
-### Avec TripoSR
-
-```powershell
-.\tools\run-image-to-3d.ps1 `
-    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
-    -AssetId "StorageTank_01" `
-    -TargetHeight 1.5 `
-    -Engine triposr
-```
-
-Le cycle est :
-
-```text
-Prompt
-  -> ComfyUI
-  -> PNG
-  -> TripoSR
-  -> mesh brut
-  -> Blender
-  -> OBJ / FBX normalisés
-```
-
-Si `-Engine` n'est pas renseigné, **TripoSR reste le moteur par défaut** pour conserver la compatibilité avec les anciennes commandes.
-
----
-
-## 5. Paramètres principaux
-
-Les paramètres les plus utiles de `run-image-to-3d.ps1` sont :
-
-```text
--Prompt         description de l'asset à générer
--AssetId        nom de l'asset et des fichiers produits
--Seed           seed de génération d'image
--TargetHeight   hauteur finale souhaitée en mètres
--Mode           single ou multiview
--Engine         trellis ou triposr (mode single)
--ProjectProfile profil de destination optionnel
--AutoImport     active ou désactive l'import automatique
-```
-
-En `-Mode multiview`, les paramètres usuels supplémentaires sont :
-
-```text
--ReferenceCandidates nombre de références FLUX candidates
--ReferencePreset     preset de préparation de la référence
--ReferenceExclude    détails à exclure de la référence
--ViewPolicy          all, balanced ou quality
--MaxViews            nombre maximal de vues données à TRELLIS
--MinViewScore        score minimal d'une vue
--FusionMode          stochastic ou multidiffusion
--IncludeReference    inclut ou non l'image de référence dans TRELLIS
-```
-
-Exemple sans import automatique :
-
-```powershell
-.\tools\run-image-to-3d.ps1 `
-    -Prompt "small sci-fi crate" `
-    -AssetId "Crate_01" `
-    -TargetHeight 0.8 `
-    -Engine trellis `
-    -AutoImport $false
-```
-
----
-
-## 6. Import automatique dans Unreal Engine
-
-L'import Unreal est **optionnel** et piloté par un profil JSON.
-
-Exemple :
-
-```powershell
-.\tools\run-image-to-3d.ps1 `
-    -Prompt "small industrial console" `
-    -AssetId "Console_01" `
-    -TargetHeight 1.2 `
-    -Engine trellis `
-    -ProjectProfile ".\profiles\mon-projet.json" `
-    -AutoImport $true
-```
-
-Le profil contient les chemins et options propres au projet consommateur. Asset Factory ne contient aucune règle spécifique à un jeu ou à un produit particulier.
-
-
-## 7. Générer uniquement une image
-
-Avec ComfyUI déjà démarré :
-
-```powershell
-.\tools\run-comfyui.ps1 `
-    -Prompt "industrial storage container, clean silhouette, neutral studio background" `
+    -AssetId "StorageTank_Ref_01" `
+    -Candidates 1 `
     -Seed 1234
 ```
 
-Les images et métadonnées sont stockées sous :
+Sélection automatique de la meilleure image parmi plusieurs candidats :
 
-```text
-outputs\jobs\
+```powershell
+.\tools\generate-image.ps1 `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -NegativePrompt "text, logo, broken geometry" `
+    -AssetId "StorageTank_Ref_02" `
+    -Candidates 8 `
+    -Seed 1234
 ```
+
+`-Candidates 1` génère une seule image.
+
+`-Candidates N` génère N candidats puis conserve automatiquement la meilleure référence.
 
 ---
 
-## 8. Générer directement depuis une image existante
+## 2. Générer un asset depuis une image
 
-### TRELLIS
+### TRELLIS direct
 
 ```powershell
-.\tools\run-trellis.ps1 `
-    -InputPath ".\mon-image.png"
+.\tools\generate-asset-from-image.ps1 `
+    -InputPath ".\reference.png" `
+    -AssetId "StorageTank_01" `
+    -GeometryMethod trellis `
+    -MultiviewMethod none `
+    -TargetHeight 1.5 `
+    -AutoImport $false
 ```
 
-Le GLB généré reprend le nom du PNG :
+### TRELLIS avec multi-vues
 
-```text
-mon-image.png -> mon-image.glb
+```powershell
+.\tools\generate-asset-from-image.ps1 `
+    -InputPath ".\reference.png" `
+    -AssetId "StorageTank_MV_01" `
+    -GeometryMethod trellis `
+    -MultiviewMethod zero123plus-v1.1 `
+    -TargetHeight 1.5 `
+    -AutoImport $false
 ```
 
 ### TripoSR
 
 ```powershell
-.\tools\run-triposr.ps1 `
-    -InputPath ".\mon-image.png"
+.\tools\generate-asset-from-image.ps1 `
+    -InputPath ".\reference.png" `
+    -AssetId "StorageTank_TripoSR_01" `
+    -GeometryMethod triposr `
+    -MultiviewMethod none `
+    -TargetHeight 1.5 `
+    -AutoImport $false
 ```
 
 ---
 
-## 9. Génération par lots
+## 3. Générer un asset directement depuis un prompt
 
-Les batches sont décrits par des manifestes JSON dans :
+### Best-of-N puis TRELLIS direct
 
-```text
-batches\
+```powershell
+.\tools\generate-asset-from-prompt.ps1 `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -NegativePrompt "text, logo, broken geometry" `
+    -AssetId "StorageTank_02" `
+    -Candidates 8 `
+    -Seed 1234 `
+    -GeometryMethod trellis `
+    -MultiviewMethod none `
+    -TargetHeight 1.5 `
+    -AutoImport $false
 ```
 
-Pour lancer un batch complet avec TRELLIS :
+### Best-of-N puis multi-vues puis TRELLIS
+
+```powershell
+.\tools\generate-asset-from-prompt.ps1 `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -AssetId "StorageTank_MV_02" `
+    -Candidates 8 `
+    -GeometryMethod trellis `
+    -MultiviewMethod zero123plus-v1.1 `
+    -TargetHeight 1.5 `
+    -AutoImport $false
+```
+
+### Best-of-N puis TripoSR
+
+```powershell
+.\tools\generate-asset-from-prompt.ps1 `
+    -Prompt "compact industrial storage tank, worn metal, isolated object, neutral studio background" `
+    -AssetId "StorageTank_TripoSR_02" `
+    -Candidates 4 `
+    -GeometryMethod triposr `
+    -MultiviewMethod none `
+    -TargetHeight 1.5 `
+    -AutoImport $false
+```
+
+---
+
+## Paramètres principaux
+
+```text
+-Prompt            prompt image
+-NegativePrompt    éléments à éviter
+-AssetId           identifiant de l'asset
+-Candidates        nombre d'images candidates
+-Seed              seed de génération
+-InputPath         image source existante
+-GeometryMethod    trellis ou triposr
+-MultiviewMethod   none ou zero123plus-v1.1
+-TargetHeight      hauteur finale en mètres
+-ProjectProfile    profil Unreal optionnel
+-AutoImport        import Unreal automatique
+```
+
+Paramètres multi-vues utiles :
+
+```text
+-FusionMode
+-IncludeReference
+-ViewPolicy
+-MaxViews
+-MinViewScore
+```
+
+---
+
+## Import Unreal
+
+```powershell
+.\tools\generate-asset-from-image.ps1 `
+    -InputPath ".\reference.png" `
+    -AssetId "Console_01" `
+    -GeometryMethod trellis `
+    -MultiviewMethod none `
+    -TargetHeight 1.2 `
+    -ProjectProfile ".\profiles\mon-projet.json" `
+    -AutoImport $true
+```
+
+---
+
+## Batches
+
+Image uniquement :
 
 ```powershell
 .\tools\run-batch.ps1 `
     -BatchPath ".\batches\mon-batch.json" `
-    -Engine trellis
+    -Mode images `
+    -Candidates 8
 ```
 
-Avec TripoSR :
+Pipeline complet :
 
 ```powershell
 .\tools\run-batch.ps1 `
     -BatchPath ".\batches\mon-batch.json" `
-    -Engine triposr
+    -Mode full `
+    -Engine trellis `
+    -Candidates 8 `
+    -AutoImport $false
 ```
 
-Les traitements GPU lourds sont exécutés séquentiellement afin de limiter les conflits de VRAM.
+Avec multi-vues :
+
+```powershell
+.\tools\run-batch.ps1 `
+    -BatchPath ".\batches\mon-batch.json" `
+    -Mode full `
+    -Engine trellis `
+    -Candidates 8 `
+    -MultiviewMethod zero123plus-v1.1 `
+    -AutoImport $false
+```
 
 ---
 
-## 10. Sorties
+## Sorties
 
-Chaque pipeline possède son propre dossier :
+Les assets sont versionnés :
 
 ```text
-outputs\pipelines\<pipeline-id>\
+outputs/
+└─ assets/
+   └─ StorageTank_01/
+      ├─ v001/
+      ├─ v002/
+      └─ ...
 ```
 
-Exemple avec TRELLIS :
+Une génération peut contenir notamment :
 
 ```text
-outputs\pipelines\<pipeline-id>\
-├─ input\
-│  └─ StorageTank_01.png
-├─ generated\
-│  └─ trellis\
-│     └─ StorageTank_01.glb
-├─ processed\
-│  └─ StorageTank_01.glb
-├─ logs\
-└─ pipeline.json
+source/
+raw/
+final/
+logs/
+metadata/
+generation.json
 ```
 
-`pipeline.json` indique notamment :
-
-- le moteur utilisé ;
-- l'image d'entrée ;
-- le modèle généré ;
-- les dimensions finales ;
-- la hauteur cible ;
-- le statut du pipeline ;
-- l'étape ayant échoué, le cas échéant.
-
-Les fichiers intermédiaires sont conservés afin qu'une étape en erreur puisse être diagnostiquée ou relancée sans recalculer tout le pipeline.
+Les versions existantes ne sont pas écrasées.
 
 ---
 
-## 11. TRELLIS hors ligne
-
-Une fois les modèles installés avec :
-
-```powershell
-.\setup-asset-factory.ps1 trellis model-install
-```
-
-le runner TRELLIS utilise les modèles locaux préparés par Asset Factory.
-
-Pour vérifier leur présence :
-
-```powershell
-.\setup-asset-factory.ps1 trellis model-status
-```
-
----
-
-## Génération multi-vues (optionnelle)
-
-Pour générer plusieurs vues cohérentes depuis une seule image de référence :
-
-```powershell
-.\tools\run-multiview.ps1 `
-    -Prompt "A rugged industrial portable work light, single isolated object" `
-    -AssetId "WorkLight_01" `
-    -Method "zero123plus-v1.1"
-```
-
-Une image existante peut être fournie avec `-ReferenceImage`. Les paramètres d'une méthode peuvent être définis en ligne de commande ou dans un profil multi-vues.
-
-Voir [`docs/MULTIVIEW.md`](docs/MULTIVIEW.md) pour les méthodes disponibles et leur configuration.
-
----
-
-## 12. Vérifications utiles
-
-État général :
+## Vérifications
 
 ```powershell
 .\setup-asset-factory.ps1 status
-```
-
-Diagnostic général :
-
-```powershell
 .\setup-asset-factory.ps1 doctor
-```
-
-ComfyUI :
-
-```powershell
 .\setup-asset-factory.ps1 comfyui status
 .\setup-asset-factory.ps1 comfyui doctor
-```
-
-TripoSR :
-
-```powershell
 .\setup-asset-factory.ps1 triposr status
 .\setup-asset-factory.ps1 triposr doctor
-```
-
-TRELLIS :
-
-```powershell
 .\setup-asset-factory.ps1 trellis model-status
 ```
 
-Test des contrats du cycle sans lancer de génération réelle :
+Tests du cycle :
 
 ```powershell
 .\tests\test-cycle-contracts.ps1
@@ -461,31 +335,28 @@ Test des contrats du cycle sans lancer de génération réelle :
 
 ---
 
-## 13. Structure simplifiée du dépôt
+## Structure
 
 ```text
 AssetFactory/
 ├─ batches/
 ├─ blender/
-│  └─ scripts/
+├─ config/
 ├─ docs/
 ├─ engines/
-│  ├─ comfyui/
-│  ├─ trellis/
-│  └─ triposr/
 ├─ models/
 ├─ outputs/
 ├─ profiles/
 ├─ tools/
-│  ├─ import-unreal.ps1
-│  ├─ run-batch.ps1
-│  ├─ run-comfyui.ps1
-│  ├─ run-image-to-3d.ps1
-│  ├─ run-trellis.ps1
-│  └─ run-triposr.ps1
+│  ├─ generate-image.ps1
+│  ├─ generate-asset-from-image.ps1
+│  ├─ generate-asset-from-prompt.ps1
+│  ├─ internal/
+│  └─ run-batch.ps1
 ├─ unreal/
 ├─ workflows/
 ├─ setup-asset-factory.ps1
 └─ README.md
 ```
----
+
+Les anciens scripts `run-*.ps1` restent disponibles pour le debug et les usages bas niveau.

@@ -8,7 +8,13 @@ param(
     [string]$Mode = "images",
 
     [ValidateSet("triposr", "trellis")]
-    [string]$Engine = "triposr",
+    [string]$Engine = "trellis",
+
+    [ValidateRange(1, 64)]
+    [int]$Candidates = 1,
+    [string]$Preset = "",
+    [string[]]$Exclude = @(),
+    [string]$MultiviewMethod = "none",
 
     [ValidateRange(0.001, 1000000.0)]
     [double]$TargetHeight = 1.0,
@@ -63,12 +69,13 @@ try {
     $EffectiveMode = $EffectiveMode.ToLowerInvariant()
     if ($EffectiveMode -notin @("images", "full")) { throw "Batch mode must be 'images' or 'full'." }
 
-    $ComfyRunner = Join-Path $PSScriptRoot "run-comfyui.ps1"
-    $PipelineRunner = Join-Path $PSScriptRoot "run-image-to-3d.ps1"
-    if ($EffectiveMode -eq "images") {
-        Assert-AFFile -Path $ComfyRunner -Label "ComfyUI runner"
-    } else {
-        Assert-AFFile -Path $PipelineRunner -Label "Image-to-3D pipeline"
+    $ImageRunner = Join-Path $PSScriptRoot "generate-image.ps1"
+    $AssetFromPromptRunner = Join-Path $PSScriptRoot "generate-asset-from-prompt.ps1"
+    $AssetFromImageRunner = Join-Path $PSScriptRoot "generate-asset-from-image.ps1"
+    Assert-AFFile -Path $ImageRunner -Label "Point d'entree generation d'image"
+    if ($EffectiveMode -eq "full") {
+        Assert-AFFile -Path $AssetFromPromptRunner -Label "Point d'entree asset depuis prompt"
+        Assert-AFFile -Path $AssetFromImageRunner -Label "Point d'entree asset depuis image"
     }
 
     $SeenIds = @{}
@@ -88,7 +95,7 @@ try {
             Assert-AFFile -Path $inputPath -Label "Batch input image"
         }
 
-        $assetEngine = [string](Get-BatchSetting $Asset $Batch "engine" "Engine" "triposr")
+        $assetEngine = [string](Get-BatchSetting $Asset $Batch "engine" "Engine" "trellis")
         $assetEngine = $assetEngine.ToLowerInvariant()
         if ($assetEngine -notin @("triposr", "trellis")) {
             throw "Asset '$id': engine must be 'triposr' or 'trellis'."
@@ -105,6 +112,16 @@ try {
             [decimal]$seed -ne [decimal]::Truncate([decimal]$seed)) {
             throw "Asset '$id': seed must be a non-negative 64-bit integer."
         }
+
+        $candidates = Get-BatchSetting $Asset $Batch "candidates" "Candidates" 1
+        if ($candidates -is [string] -or $candidates -is [bool] -or $null -eq $candidates -or
+            [int]$candidates -lt 1 -or [int]$candidates -gt 64) {
+            throw "Asset '$id': candidates must be an integer between 1 and 64."
+        }
+        $preset = [string](Get-BatchSetting $Asset $Batch "preset" "Preset" "")
+        $exclude = @(Get-BatchSetting $Asset $Batch "exclude" "Exclude" @())
+        $multiviewMethod = [string](Get-BatchSetting $Asset $Batch "multiviewMethod" "MultiviewMethod" "none")
+        if ([string]::IsNullOrWhiteSpace($multiviewMethod)) { $multiviewMethod = "none" }
 
         $profile = [string](Get-BatchSetting $Asset $Batch "projectProfile" "ProjectProfile" "")
         $categoryValue = [string](Get-BatchSetting $Asset $Batch "category" "Category" "")
@@ -134,6 +151,10 @@ try {
             inputPath = $inputPath
             negativePrompt = [string](Get-AFProperty $Asset "negativePrompt" "")
             seed = [long]$seed
+            candidates = [int]$candidates
+            preset = $preset
+            exclude = @($exclude)
+            multiviewMethod = $multiviewMethod
             engine = $assetEngine
             targetHeight = [double]$height
             projectProfile = $profile
@@ -193,58 +214,68 @@ try {
         Write-AFInfo "Asset $($ActiveRecord.id) ($($index + 1)/$($Records.Count))"
 
         if ($EffectiveMode -eq "images") {
-            $result = Invoke-AFCommand -Executable $ComfyRunner -LogPath $ActiveRecord.logPath -Parameters @{
+            $parameters = @{
                 Prompt = $ActiveRecord.prompt
                 NegativePrompt = $ActiveRecord.negativePrompt
                 Seed = $ActiveRecord.seed
-                WorkflowPath = $WorkflowPath
-                ServerUrl = $ServerUrl
-                TimeoutSeconds = $TimeoutSeconds
                 AssetId = $ActiveRecord.id
-            }
-            if ($result.ExitCode -ne 0) {
-                $ActiveRecord.failedStage = "comfyui"
-                throw "Image generation failed for '$($ActiveRecord.id)'. See $($ActiveRecord.logPath)"
-            }
-            $ActiveRecord.generationRoot = Get-AFOutputValue $result.Output "[OK] Generation: "
-            $ActiveRecord.assetVersion = Get-AFOutputValue $result.Output "[OK] Version: " -Optional
-            $ActiveRecord.imagePath = Get-AFOutputValue $result.Output "[OK] Image: "
-            $generationMetadata = Get-AFOutputValue $result.Output "[OK] Generation metadata: " -Optional
-            if ([string]::IsNullOrWhiteSpace($generationMetadata)) {
-                $candidate = Join-Path $ActiveRecord.generationRoot "generation.json"
-                $generationMetadata = if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                    $candidate
-                } else {
-                    Get-AFOutputValue $result.Output "[OK] Metadata: " -Optional
-                }
-            }
-            $ActiveRecord.generationMetadataPath = $generationMetadata
-            Assert-AFFile -Path $ActiveRecord.imagePath -Label "Batch image"
-        } else {
-            $parameters = @{
-                AssetId = $ActiveRecord.id
-                NegativePrompt = $ActiveRecord.negativePrompt
-                Seed = $ActiveRecord.seed
-                Engine = $ActiveRecord.engine
-                TargetHeight = $ActiveRecord.targetHeight
-                ProjectProfile = $ActiveRecord.projectProfile
-                Category = $ActiveRecord.category
+                Candidates = $ActiveRecord.candidates
+                Preset = $ActiveRecord.preset
+                Exclude = @($ActiveRecord.exclude)
                 WorkflowPath = $WorkflowPath
                 ServerUrl = $ServerUrl
                 TimeoutSeconds = $TimeoutSeconds
                 ReleaseComfyMemory = $ActiveRecord.releaseComfyMemory
+            }
+            $result = Invoke-AFCommand -Executable $ImageRunner -LogPath $ActiveRecord.logPath -Parameters $parameters
+            $resultJson = Get-AFOutputValue $result.Output "[RESULT_JSON] " -Optional
+            if (-not [string]::IsNullOrWhiteSpace($resultJson)) {
+                $summary = $resultJson | ConvertFrom-Json
+                $ActiveRecord.generationId = $summary.generationId
+                $ActiveRecord.assetVersion = $summary.assetVersion
+                $ActiveRecord.generationRoot = $summary.generationRoot
+                $ActiveRecord.generationMetadataPath = $summary.metadataPath
+                $ActiveRecord.imagePath = $summary.imagePath
+            }
+            if ($result.ExitCode -ne 0) {
+                $ActiveRecord.failedStage = "image"
+                throw "Image generation failed for '$($ActiveRecord.id)'. See $($ActiveRecord.logPath)"
+            }
+            Assert-AFFile -Path $ActiveRecord.imagePath -Label "Batch image"
+        } else {
+            $commonParameters = @{
+                AssetId = $ActiveRecord.id
+                Seed = $ActiveRecord.seed
+                GeometryMethod = $ActiveRecord.engine
+                MultiviewMethod = $ActiveRecord.multiviewMethod
+                TargetHeight = $ActiveRecord.targetHeight
+                ProjectProfile = $ActiveRecord.projectProfile
+                Category = $ActiveRecord.category
                 TrellisSimplify = $ActiveRecord.trellisSimplify
                 TrellisTextureSize = $ActiveRecord.trellisTextureSize
             }
+            if ($null -ne $ActiveRecord.autoImport) { $commonParameters.AutoImport = [bool]$ActiveRecord.autoImport }
+            if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) { $commonParameters.BlenderPath = $BlenderPath }
+
             if ([string]::IsNullOrWhiteSpace($ActiveRecord.inputPath)) {
+                $runner = $AssetFromPromptRunner
+                $parameters = @{} + $commonParameters
                 $parameters.Prompt = $ActiveRecord.prompt
+                $parameters.NegativePrompt = $ActiveRecord.negativePrompt
+                $parameters.Candidates = $ActiveRecord.candidates
+                $parameters.Preset = $ActiveRecord.preset
+                $parameters.Exclude = @($ActiveRecord.exclude)
+                $parameters.WorkflowPath = $WorkflowPath
+                $parameters.ServerUrl = $ServerUrl
+                $parameters.TimeoutSeconds = $TimeoutSeconds
+                $parameters.ReleaseComfyMemory = $ActiveRecord.releaseComfyMemory
             } else {
+                $runner = $AssetFromImageRunner
+                $parameters = @{} + $commonParameters
                 $parameters.InputPath = $ActiveRecord.inputPath
             }
-            if ($null -ne $ActiveRecord.autoImport) { $parameters.AutoImport = [bool]$ActiveRecord.autoImport }
-            if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) { $parameters.BlenderPath = $BlenderPath }
 
-            $result = Invoke-AFCommand -Executable $PipelineRunner -LogPath $ActiveRecord.logPath -Parameters $parameters
+            $result = Invoke-AFCommand -Executable $runner -LogPath $ActiveRecord.logPath -Parameters $parameters
             $resultJson = Get-AFOutputValue $result.Output "[RESULT_JSON] " -Optional
             if (-not [string]::IsNullOrWhiteSpace($resultJson)) {
                 $summary = $resultJson | ConvertFrom-Json

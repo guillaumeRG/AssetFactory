@@ -26,7 +26,7 @@ param(
     [string]$Category = "",
     [System.Nullable[bool]]$AutoImport = $null,
 
-    # Paramètres multi-vues. Ils ne sont utilisés que lorsque -Mode multiview est sélectionné.
+    # La sélection de référence est commune aux modes direct et multi-vues.
     [string]$MultiviewMethod = "",
     [string]$MultiviewProfile = "",
     [System.Nullable[int]]$MultiviewSteps = $null,
@@ -67,12 +67,12 @@ $ErrorActionPreference = "Stop"
 
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot "pipeline-common.ps1")
+Import-Module (Join-Path $PSScriptRoot "internal\AssetFactory.Pipeline.psm1") -Force
 
 $ScriptBoundParameters = $PSBoundParameters
 
 $Engine = $Engine.ToLowerInvariant()
 $UseExistingImage = $PSCmdlet.ParameterSetName -eq "Image"
-$ComfyRunner = Join-Path $PSScriptRoot "run-comfyui.ps1"
 $GeometryRunner = Join-Path $PSScriptRoot "run-$Engine.ps1"
 $MultiViewRunner = Join-Path $PSScriptRoot "run-multiview.ps1"
 $MultiViewGeometryRunner = Join-Path $PSScriptRoot "run-multiview-to-3d.ps1"
@@ -278,9 +278,6 @@ try {
         if ([System.IO.Path]::GetExtension($SourceImage).ToLowerInvariant() -notin @(".png", ".jpg", ".jpeg", ".webp")) {
             throw "InputPath doit être une image PNG, JPEG ou WebP."
         }
-    } else {
-        Assert-AFFile -Path $ComfyRunner -Label "ComfyUI runner"
-        Assert-AFFile -Path (Resolve-AFPath $WorkflowPath $AssetFactoryRoot) -Label "ComfyUI workflow"
     }
 
     if ([string]::IsNullOrWhiteSpace($AssetId)) {
@@ -374,6 +371,12 @@ try {
             imagePath = $null
             metadataPath = (Join-Path $Layout.MetadataDir "comfyui.json")
             logPath = (Join-Path $Layout.LogsDir "comfyui.log")
+            candidateCount = $(if ($UseExistingImage) { 1 } else { $ReferenceCandidates })
+            candidatePaths = @()
+            selectionReportPath = $null
+            promptUsed = $null
+            negativePromptUsed = $null
+            preset = $null
             error = $null
         }
         gpuHandoff = [ordered]@{
@@ -455,30 +458,37 @@ try {
     } else {
         $GenerationMetadata.comfyui.status = "running"
         Save-AFJson $GenerationMetadata $GenerationMetadataPath
-        $comfyResult = Invoke-AFCommand -Executable $ComfyRunner `
-            -LogPath $GenerationMetadata.comfyui.logPath -Parameters @{
-                Prompt = $Prompt
-                NegativePrompt = $NegativePrompt
-                Seed = $Seed
-                WorkflowPath = $WorkflowPath
-                ServerUrl = $ServerUrl
-                TimeoutSeconds = $TimeoutSeconds
-                AssetId = $AssetId
-                GenerationRoot = $Layout.Root
-                AssetVersion = $Layout.Version
-                PipelineManaged = $true
-            }
-        Assert-StageSuccess $comfyResult "ComfyUI"
 
-        $comfyMetadataPath = Join-Path $Layout.MetadataDir "comfyui.json"
-        Assert-AFFile -Path $comfyMetadataPath -Label "Métadonnées ComfyUI"
-        $comfyMetadata = Get-Content -LiteralPath $comfyMetadataPath -Raw | ConvertFrom-Json
-        $ImagePath = [string]$comfyMetadata.imagePath
-        $GenerationMetadata.comfyui.jobId = [string]$comfyMetadata.jobId
-        $GenerationMetadata.comfyui.metadataPath = $comfyMetadataPath
-        Assert-AFFile -Path $ImagePath -Label "Image générée"
+        # La generation et la selection best-of-N sont factorisees avec le mode multi-vues
+        # et avec le point d'entree generate-image.ps1.
+        $imageStage = Invoke-AFImageStage `
+            -Prompt $Prompt `
+            -NegativePrompt $NegativePrompt `
+            -AssetId $AssetId `
+            -GenerationRoot $Layout.Root `
+            -AssetVersion $Layout.Version `
+            -Seed $Seed `
+            -Candidates $ReferenceCandidates `
+            -Preset $ReferencePreset `
+            -Exclude @($ReferenceExclude) `
+            -Purpose source `
+            -WorkflowPath $WorkflowPath `
+            -ServerUrl $ServerUrl `
+            -TimeoutSeconds $TimeoutSeconds `
+            -ReleaseComfyMemory $false
+
+        $ImagePath = [string]$imageStage.ImagePath
+        Assert-AFFile -Path $ImagePath -Label "Image generee"
         $GenerationMetadata.comfyui.status = "completed"
         $GenerationMetadata.comfyui.imagePath = $ImagePath
+        $GenerationMetadata.comfyui.metadataPath = $imageStage.QualityPath
+        $GenerationMetadata.comfyui.logPath = $null
+        $GenerationMetadata.comfyui.candidateCount = $ReferenceCandidates
+        $GenerationMetadata.comfyui.candidatePaths = @($imageStage.CandidatePaths)
+        $GenerationMetadata.comfyui.selectionReportPath = $imageStage.QualityPath
+        $GenerationMetadata.comfyui.promptUsed = $imageStage.PromptUsed
+        $GenerationMetadata.comfyui.negativePromptUsed = $imageStage.NegativePromptUsed
+        $GenerationMetadata.comfyui.preset = $imageStage.Preset
     }
     $GenerationMetadata.imagePath = $ImagePath
     Save-AFJson $GenerationMetadata $GenerationMetadataPath

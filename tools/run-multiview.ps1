@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Prompt = "",
     [string]$NegativePrompt = "",
@@ -36,10 +36,9 @@ $ErrorActionPreference = "Stop"
 
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot "pipeline-common.ps1")
+Import-Module (Join-Path $PSScriptRoot "internal\AssetFactory.Pipeline.psm1") -Force
 
 $RegistryPath = Join-Path $AssetFactoryRoot "config\multiview-methods.json"
-$ReferencePresetRegistryPath = Join-Path $AssetFactoryRoot "config\reference-presets.json"
-$ComfyRunner = Join-Path $PSScriptRoot "run-comfyui.ps1"
 $PythonRunner = Join-Path $PSScriptRoot "run_multiview.py"
 $QualityRunner = Join-Path $PSScriptRoot "multiview_quality.py"
 $LockHandle = $null
@@ -65,19 +64,12 @@ function Set-JsonProperty {
     $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
 }
 
-function Join-PromptText {
-    param([string[]]$Parts)
-    $filtered = @($Parts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
-    return ($filtered -join ", ")
-}
-
 try {
     Assert-AFFileStem -Name $AssetId
     if (-not [string]::IsNullOrWhiteSpace($AssetVersion)) { Assert-AFAssetVersion -Version $AssetVersion }
     Assert-AFFile -Path $PythonRunner -Label "Runner multi-vues Python"
     Assert-AFFile -Path $QualityRunner -Label "Runner qualité multi-vues"
     Assert-AFFile -Path $RegistryPath -Label "Registre des méthodes multi-vues"
-    Assert-AFFile -Path $ReferencePresetRegistryPath -Label "Registre des presets de référence"
 
     $useExistingReference = -not [string]::IsNullOrWhiteSpace($ReferenceImage)
     if (-not $useExistingReference -and [string]::IsNullOrWhiteSpace($Prompt)) {
@@ -86,15 +78,9 @@ try {
     if ($useExistingReference -and $ReferenceCandidates -ne 1) {
         throw "ReferenceCandidates ne s’applique qu’aux références générées depuis un prompt."
     }
-    if (-not $useExistingReference) {
-        Assert-AFFile -Path $ComfyRunner -Label "Runner ComfyUI"
-        Assert-AFFile -Path (Resolve-AFPath $WorkflowPath $AssetFactoryRoot) -Label "Workflow ComfyUI"
-    }
 
     $registry = Read-JsonFile -Path $RegistryPath -Label "Registre multi-vues"
     if ([int](Get-OptionalSetting $registry "schemaVersion" 0) -ne 1) { throw "Version du registre multi-vues non prise en charge." }
-    $presetRegistry = Read-JsonFile -Path $ReferencePresetRegistryPath -Label "Registre des presets de référence"
-    if ([int](Get-OptionalSetting $presetRegistry "schemaVersion" 0) -ne 1) { throw "Version du registre des presets de référence non prise en charge." }
 
     $profile = $null
     if (-not [string]::IsNullOrWhiteSpace($MethodProfile)) {
@@ -127,29 +113,13 @@ try {
     $resolvedKeepGrid = if ($null -ne $KeepGrid) { [bool]$KeepGrid } elseif ($null -ne (Get-OptionalSetting $profileParameters "keepGrid" $null)) { [bool](Get-OptionalSetting $profileParameters "keepGrid") } else { [bool](Get-OptionalSetting $defaults "keepGrid" $true) }
     $resolvedConditioningPrompt = if ($PSBoundParameters.ContainsKey("ConditioningPrompt")) { $ConditioningPrompt } elseif ($null -ne (Get-OptionalSetting $profileParameters "conditioningPrompt" $null)) { [string](Get-OptionalSetting $profileParameters "conditioningPrompt") } else { [string](Get-OptionalSetting $defaults "conditioningPrompt" "") }
     $resolvedReferenceCandidates = if ($PSBoundParameters.ContainsKey("ReferenceCandidates")) { [int]$ReferenceCandidates } elseif ($null -ne (Get-OptionalSetting $profileReference "candidates" $null)) { [int](Get-OptionalSetting $profileReference "candidates") } else { 1 }
-    $resolvedReferencePreset = if ($PSBoundParameters.ContainsKey("ReferencePreset")) { $ReferencePreset } elseif ($null -ne (Get-OptionalSetting $profileReference "preset" $null)) { [string](Get-OptionalSetting $profileReference "preset") } else { [string](Get-OptionalSetting $presetRegistry "defaultPreset" "") }
+    $resolvedReferencePreset = if ($PSBoundParameters.ContainsKey("ReferencePreset")) { $ReferencePreset } elseif ($null -ne (Get-OptionalSetting $profileReference "preset" $null)) { [string](Get-OptionalSetting $profileReference "preset") } else { "" }
     $resolvedReferenceExclude = if ($PSBoundParameters.ContainsKey("ReferenceExclude")) { @($ReferenceExclude) } else { @(Get-OptionalSetting $profileReference "exclude" @()) }
 
     if ($resolvedSteps -lt 1 -or $resolvedSteps -gt 200) { throw "Steps doit être compris entre 1 et 200." }
     if ($resolvedGuidance -lt 0 -or $resolvedGuidance -gt 30) { throw "GuidanceScale doit être compris entre 0 et 30." }
     if ($resolvedReferenceCandidates -lt 1 -or $resolvedReferenceCandidates -gt 64) { throw "ReferenceCandidates doit être compris entre 1 et 64." }
     if ($resolvedReferenceCandidates -gt 16) { Write-AFInfo "ReferenceCandidates=$resolvedReferenceCandidates : cette étape lancera autant de générations ComfyUI." }
-
-    $resolvedPresetConfig = $null
-    if (-not [string]::IsNullOrWhiteSpace($resolvedReferencePreset) -and $resolvedReferencePreset -ne "none") {
-        $presetMap = Get-OptionalSetting $presetRegistry "presets" $null
-        $resolvedPresetConfig = Get-OptionalSetting $presetMap $resolvedReferencePreset $null
-        if ($null -eq $resolvedPresetConfig) {
-            $availablePresets = @($presetMap.PSObject.Properties.Name) -join ", "
-            throw "Preset de référence inconnu '$resolvedReferencePreset'. Disponibles : $availablePresets"
-        }
-    }
-
-    $referencePositiveAugmentation = if ($null -ne $resolvedPresetConfig) { [string](Get-OptionalSetting $resolvedPresetConfig "positiveSuffix" "") } else { "" }
-    $referenceNegativeAugmentation = if ($null -ne $resolvedPresetConfig) { [string](Get-OptionalSetting $resolvedPresetConfig "negativeSuffix" "") } else { "" }
-    $resolvedReferencePrompt = if ($useExistingReference) { "" } else { Join-PromptText @($Prompt, $referencePositiveAugmentation) }
-    $referenceExcludeText = if (@($resolvedReferenceExclude).Count -gt 0) { (@($resolvedReferenceExclude) -join ", ") } else { "" }
-    $resolvedReferenceNegativePrompt = if ($useExistingReference) { "" } else { Join-PromptText @($NegativePrompt, $referenceNegativeAugmentation, $referenceExcludeText) }
 
     $methodEngineRoot = Resolve-AFPath -Path ([string](Get-OptionalSetting $methodConfig "engineRoot" "")) -BasePath $AssetFactoryRoot
     $methodModelRoot = Resolve-AFPath -Path ([string](Get-OptionalSetting $methodConfig "modelRoot" "")) -BasePath $AssetFactoryRoot
@@ -183,10 +153,8 @@ try {
 
     $MetadataPath = Join-Path $Layout.MetadataDir "multiview.json"
     $ReferenceDir = Join-Path $Layout.SourceDir "reference"
-    $ReferenceCandidatesDir = Join-Path $ReferenceDir "candidates"
     $ViewsDir = Join-Path $Layout.SourceDir "views"
     New-Item -ItemType Directory -Path $ReferenceDir -Force | Out-Null
-    New-Item -ItemType Directory -Path $ReferenceCandidatesDir -Force | Out-Null
     New-Item -ItemType Directory -Path $ViewsDir -Force | Out-Null
 
     $Metadata = [ordered]@{
@@ -205,9 +173,9 @@ try {
             reference = [ordered]@{
                 method = $(if ($useExistingReference) { "provided-image" } else { "comfyui-flux-schnell" })
                 prompt = $(if ($useExistingReference) { $null } else { $Prompt })
-                promptUsed = $(if ($useExistingReference) { $null } else { $resolvedReferencePrompt })
+                promptUsed = $null
                 negativePrompt = $(if ($useExistingReference) { $null } else { $NegativePrompt })
-                negativePromptUsed = $(if ($useExistingReference) { $null } else { $resolvedReferenceNegativePrompt })
+                negativePromptUsed = $null
                 preset = $(if ($useExistingReference) { $null } else { $(if ([string]::IsNullOrWhiteSpace($resolvedReferencePreset)) { $null } else { $resolvedReferencePreset }) })
                 candidateCount = $(if ($useExistingReference) { 1 } else { $resolvedReferenceCandidates })
                 excludedDetails = @($resolvedReferenceExclude)
@@ -253,47 +221,28 @@ try {
         Copy-Item -LiteralPath $resolvedReference -Destination $ReferencePath
         Write-AFOk "Image de référence copiée : $ReferencePath"
     } else {
-        $generatedReferencePaths = New-Object System.Collections.Generic.List[string]
-        for ($candidateIndex = 1; $candidateIndex -le $resolvedReferenceCandidates; $candidateIndex++) {
-            $candidateSeed = $Seed + ($candidateIndex - 1)
-            $isSingleReference = $resolvedReferenceCandidates -eq 1
-            $candidateStem = if ($isSingleReference) { ($AssetId + "_reference") } else { ("{0}_reference_candidate_{1:D2}" -f $AssetId, $candidateIndex) }
-            $candidateSubfolder = if ($isSingleReference) { "reference" } else { "reference\candidates" }
-            $referenceLog = Join-Path $Layout.LogsDir ("reference-comfyui-{0:D2}.log" -f $candidateIndex)
-            $referenceParams = @{
-                Prompt = $resolvedReferencePrompt
-                NegativePrompt = $resolvedReferenceNegativePrompt
-                Seed = $candidateSeed
-                WorkflowPath = $WorkflowPath
-                ServerUrl = $ServerUrl
-                TimeoutSeconds = $TimeoutSeconds
-                AssetId = $AssetId
-                GenerationRoot = $Layout.Root
-                AssetVersion = $Layout.Version
-                OutputFileStem = $candidateStem
-                SourceSubfolder = $candidateSubfolder
-                MetadataPrefix = ("reference-comfyui-{0:D2}" -f $candidateIndex)
-                PipelineManaged = $true
-            }
-            $referenceResult = Invoke-AFCommand -Executable $ComfyRunner -Parameters $referenceParams -LogPath $referenceLog
-            if ($referenceResult.ExitCode -ne 0) { throw "La génération de l’image de référence a échoué. Log : $referenceLog" }
+        $referenceStage = Invoke-AFImageStage `
+            -Prompt $Prompt `
+            -NegativePrompt $NegativePrompt `
+            -AssetId $AssetId `
+            -GenerationRoot $Layout.Root `
+            -AssetVersion $Layout.Version `
+            -Seed $Seed `
+            -Candidates $resolvedReferenceCandidates `
+            -Preset $resolvedReferencePreset `
+            -Exclude @($resolvedReferenceExclude) `
+            -Purpose reference `
+            -WorkflowPath $WorkflowPath `
+            -ServerUrl $ServerUrl `
+            -TimeoutSeconds $TimeoutSeconds `
+            -ReleaseComfyMemory $ReleaseComfyMemory
 
-            $searchRoot = if ($isSingleReference) { $ReferenceDir } else { $ReferenceCandidatesDir }
-            $candidatePath = Get-ChildItem -LiteralPath $searchRoot -File | Where-Object { $_.BaseName -eq $candidateStem } | Select-Object -First 1 -ExpandProperty FullName
-            if ([string]::IsNullOrWhiteSpace($candidatePath)) { throw "ComfyUI n’a pas produit l’image de référence attendue dans $searchRoot" }
-            $generatedReferencePaths.Add($candidatePath)
-        }
-
-        $referenceQualityPath = Join-Path $Layout.MetadataDir "reference-quality.json"
-        $qualityArgs = @("-B", $QualityRunner, "score-references", "--output", $referenceQualityPath)
-        foreach ($candidatePath in $generatedReferencePaths) {
-            $qualityArgs += @("--image", $candidatePath)
-        }
-        $referenceQualityLog = Join-Path $Layout.LogsDir "reference-quality.log"
-        $referenceQualityResult = Invoke-AFCommand -Executable $methodPython -Arguments $qualityArgs -LogPath $referenceQualityLog
-        if ($referenceQualityResult.ExitCode -ne 0) { throw "Le scoring des références a échoué. Log : $referenceQualityLog" }
-        $referenceQuality = Read-JsonFile -Path $referenceQualityPath -Label "Qualité des références"
-
+        $ReferencePath = [string]$referenceStage.ImagePath
+        $referenceQuality = $referenceStage.Quality
+        $Metadata.methods.reference.promptUsed = $referenceStage.PromptUsed
+        $Metadata.methods.reference.negativePromptUsed = $referenceStage.NegativePromptUsed
+        $Metadata.methods.reference.preset = $referenceStage.Preset
+        $Metadata.methods.reference.candidates = @()
         foreach ($candidate in @(Get-OptionalSetting $referenceQuality "candidates" @())) {
             $Metadata.methods.reference.candidates += [ordered]@{
                 path = [string](Get-OptionalSetting $candidate "path" "")
@@ -301,22 +250,9 @@ try {
                 warnings = @(Get-OptionalSetting $candidate "warnings" @())
             }
         }
-        $selectedCandidatePath = [string](Get-OptionalSetting $referenceQuality "selectedReferencePath" "")
-        if ([string]::IsNullOrWhiteSpace($selectedCandidatePath)) { throw "Aucune référence sélectionnée n’a été renvoyée par le scoring." }
-        $selectedExtension = [System.IO.Path]::GetExtension($selectedCandidatePath).ToLowerInvariant()
-        $ReferencePath = Join-Path $ReferenceDir ($AssetId + "_reference" + $selectedExtension)
-        if ([System.IO.Path]::GetFullPath($selectedCandidatePath) -ne [System.IO.Path]::GetFullPath($ReferencePath)) {
-            Copy-Item -LiteralPath $selectedCandidatePath -Destination $ReferencePath -Force
-        }
         $Metadata.methods.reference.quality = $referenceQuality
         Write-AFOk ("Référence sélectionnée : {0}" -f $ReferencePath)
         Write-AFInfo ("Score de référence : {0}" -f (Get-OptionalSetting $referenceQuality "selectedScore" "n/a"))
-
-        if ($ReleaseComfyMemory) {
-            Write-AFInfo "Libération de la VRAM ComfyUI avant le moteur multi-vues..."
-            $release = Request-AFComfyMemoryRelease -ServerUrl $ServerUrl -TimeoutSeconds 90
-            Write-AFOk $release.message
-        }
     }
     $Metadata.methods.reference.path = $ReferencePath
     Save-AFJson -Value $Metadata -Path $Layout.GenerationMetadataPath

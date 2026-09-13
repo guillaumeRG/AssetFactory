@@ -1,7 +1,11 @@
 {
   "schemaVersion": 1,
-  "defaultPreset": "multiview-object",
+  "defaultPreset": "asset-reference",
   "presets": {
+    "asset-reference": {
+      "positiveSuffix": "single isolated object, centered in frame, full object visible, clean studio product render, neutral plain background, three-quarter frontal angle, consistent materials, clear silhouette, realistic proportions, no cut-off parts",
+      "negativeSuffix": "multiple objects, duplicated object, cluttered scene, room environment, person, hand, text, watermark, logo, crop, close-up detail shot, extreme perspective, fisheye, pedestal, turntable stand, blurry image"
+    },
     "multiview-object": {
       "positiveSuffix": "single isolated object, centered in frame, full object visible, clean studio product render, neutral plain background, three-quarter frontal angle, consistent materials, clear silhouette, realistic proportions, no cut-off parts",
       "negativeSuffix": "multiple objects, duplicated object, cluttered scene, room environment, person, hand, text, watermark, logo, crop, close-up detail shot, extreme perspective, fisheye, pedestal, turntable stand, blurry image"

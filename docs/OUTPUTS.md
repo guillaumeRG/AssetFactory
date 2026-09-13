@@ -1,4 +1,4 @@
-# Organisation des sorties
+﻿# Organisation des sorties
 
 Asset Factory regroupe les fichiers générés sous `outputs/` selon leur rôle.
 
@@ -56,6 +56,26 @@ Tous les fichiers ne sont présents que si l'étape correspondante a été exéc
 - `generation.json` : résumé de la génération complète.
 
 Les fichiers intermédiaires sont conservés volontairement. Un échec Blender ou Unreal ne force donc pas à recalculer la génération 3D.
+
+
+## Images candidates
+
+Avec `Candidates > 1`, la meilleure image reste la source canonique de la génération :
+
+```text
+source/<AssetId>.png
+```
+
+Les candidats sont conservés séparément :
+
+```text
+source/candidates/<AssetId>_candidate_01.png
+source/candidates/<AssetId>_candidate_02.png
+...
+metadata/image-selection.json
+```
+
+La même logique est utilisée pour une référence multi-vues, sous `source/reference/` et `source/reference/candidates/`.
 
 ## Batches
 
