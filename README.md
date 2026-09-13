@@ -37,6 +37,11 @@ La génération multi-vues avec **Zero123++** est optionnelle.
     <td align="center"><img src="docs/images/FuelTank_01.png" width="260"></td>
     <td align="center"><img src="docs/images/fuel_tank_3d.png" width="260"><img src="docs/images/fuel_tank_3d2.png" width="260"></td>
   </tr>
+  <tr>
+    <td align="center">A rugged industrial portable work light, rectangular black metal housing, large circular glass lamp, yellow tubular protective frame, black top handle, side adjustment knob, realistic industrial construction, single isolated object</td>
+    <td align="center"><img src="docs/images/TEST_Image_Single.png" width="260"></td>
+    <td align="center"><img src="docs/images/worklight_3d_2.png" width="260"><img src="docs/images/worklight_3d.png" width="260"></td>
+  </tr>
 </table>
 
 ---
