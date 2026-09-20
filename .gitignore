@@ -12,6 +12,10 @@ outputs/**
 !outputs/.gitkeep
 models/
 cache/
+vendor/
+docs/*
+!docs/images/
+!docs/images/**
 *.log
 *.tmp
 

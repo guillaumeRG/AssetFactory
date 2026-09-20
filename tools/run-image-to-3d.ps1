@@ -26,26 +26,19 @@ param(
     [string]$Category = "",
     [System.Nullable[bool]]$AutoImport = $null,
 
-    # La sélection de référence est commune aux modes direct et multi-vues.
-    [string]$MultiviewMethod = "",
-    [string]$MultiviewProfile = "",
-    [System.Nullable[int]]$MultiviewSteps = $null,
-    [System.Nullable[double]]$MultiviewGuidanceScale = $null,
-    [System.Nullable[bool]]$MultiviewKeepGrid = $null,
-    [string]$MultiviewConditioningPrompt = "",
     [ValidateRange(1, 64)]
     [int]$ReferenceCandidates = 1,
     [string]$ReferencePreset = "",
     [string[]]$ReferenceExclude = @(),
 
-    [string]$MultiviewGeometryMethod = "",
-    [string]$MultiviewGeometryProfile = "",
-    [string]$FusionMode = "",
-    [System.Nullable[bool]]$IncludeReference = $null,
-    [int[]]$ViewIndices = @(),
-    [string]$ViewPolicy = "",
-    [System.Nullable[int]]$MaxViews = $null,
-    [System.Nullable[double]]$MinViewScore = $null,
+    [ValidateRange(1, 100)]
+    [int]$MultiviewCameras = 8,
+    [ValidateRange(256, 8192)]
+    [int]$TextureResolution = 2048,
+    [string]$TextureCheckpoint = "RealVisXL_V5.0_fp16.safetensors",
+    [string]$TexturePrompt = "",
+    [string]$TextureNegativePrompt = "",
+    [bool]$KeepProjectedBlend = $false,
 
     [string]$WorkflowPath = "workflows\comfyui-flux-schnell-base.json",
     [string]$ServerUrl = "http://127.0.0.1:8188",
@@ -74,10 +67,9 @@ Import-Module (Join-Path $PSScriptRoot "internal\AssetFactory.Pipeline.psm1") -F
 $ScriptBoundParameters = $PSBoundParameters
 
 $Engine = $Engine.ToLowerInvariant()
+if ($Mode -eq "multiview" -and $Engine -ne "trellis") { throw "Le mode multi-vues nécessite TRELLIS." }
 $UseExistingImage = $PSCmdlet.ParameterSetName -eq "Image"
 $GeometryRunner = Join-Path $PSScriptRoot "run-$Engine.ps1"
-$MultiViewRunner = Join-Path $PSScriptRoot "run-multiview.ps1"
-$MultiViewGeometryRunner = Join-Path $PSScriptRoot "run-multiview-to-3d.ps1"
 $BlenderScript = Join-Path $AssetFactoryRoot "blender\scripts\process-mesh.py"
 $UnrealImportRunner = Join-Path $PSScriptRoot "import-unreal.ps1"
 
@@ -114,153 +106,163 @@ function Assert-StageSuccess {
     }
 }
 
-function Invoke-AFMultiViewCycle {
-    # Le mode multi-vues reste une orchestration : les deux runners spécialisés
-    # conservent chacun la responsabilité de leur étape et restent appelables seuls.
-    Assert-AFFile -Path $MultiViewRunner -Label "Runner multi-vues"
-    Assert-AFFile -Path $MultiViewGeometryRunner -Label "Runner multi-vues-vers-3D"
 
-    $resolvedSourceImage = $null
-    if ($UseExistingImage) {
-        $resolvedSourceImage = Resolve-AFPath -Path $InputPath -BasePath (Get-Location).Path
-        Assert-AFFile -Path $resolvedSourceImage -Label "Input image"
-        if ([System.IO.Path]::GetExtension($resolvedSourceImage).ToLowerInvariant() -notin @(".png", ".jpg", ".jpeg", ".webp")) {
-            throw "InputPath doit être une image PNG, JPEG ou WebP."
-        }
+function Test-AFComfyServer {
+    param([Parameter(Mandatory)][string]$BaseUrl)
+    try {
+        Invoke-RestMethod -Uri ($BaseUrl.TrimEnd("/") + "/queue") -Method Get -TimeoutSec 3 | Out-Null
+        return $true
+    } catch {
+        return $false
     }
-
-    if ([string]::IsNullOrWhiteSpace($AssetId)) {
-        $script:AssetId = if ($UseExistingImage) {
-            [System.IO.Path]::GetFileNameWithoutExtension($resolvedSourceImage)
-        } else {
-            "Asset_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        }
-    }
-    Assert-AFFileStem -Name $AssetId
-    if (-not [string]::IsNullOrWhiteSpace($AssetVersion)) { Assert-AFAssetVersion -Version $AssetVersion }
-
-    $multiviewParameters = @{
-        AssetId = $AssetId
-        Seed = $Seed
-        WorkflowPath = $WorkflowPath
-        ServerUrl = $ServerUrl
-        TimeoutSeconds = $TimeoutSeconds
-        ReleaseComfyMemory = $ReleaseComfyMemory
-    }
-    if ($UseExistingImage) {
-        $multiviewParameters.ReferenceImage = $resolvedSourceImage
-    } else {
-        $multiviewParameters.Prompt = $Prompt
-        $multiviewParameters.NegativePrompt = $NegativePrompt
-    }
-    if (-not [string]::IsNullOrWhiteSpace($AssetVersion)) { $multiviewParameters.AssetVersion = $AssetVersion }
-    if (-not [string]::IsNullOrWhiteSpace($MultiviewMethod)) { $multiviewParameters.Method = $MultiviewMethod }
-    if (-not [string]::IsNullOrWhiteSpace($MultiviewProfile)) { $multiviewParameters.MethodProfile = $MultiviewProfile }
-    if ($null -ne $MultiviewSteps) { $multiviewParameters.Steps = $MultiviewSteps }
-    if ($null -ne $MultiviewGuidanceScale) { $multiviewParameters.GuidanceScale = $MultiviewGuidanceScale }
-    if ($null -ne $MultiviewKeepGrid) { $multiviewParameters.KeepGrid = $MultiviewKeepGrid }
-    if ($ScriptBoundParameters.ContainsKey("MultiviewConditioningPrompt")) { $multiviewParameters.ConditioningPrompt = $MultiviewConditioningPrompt }
-    if ($ScriptBoundParameters.ContainsKey("ReferenceCandidates")) { $multiviewParameters.ReferenceCandidates = $ReferenceCandidates }
-    if ($ScriptBoundParameters.ContainsKey("ReferencePreset")) { $multiviewParameters.ReferencePreset = $ReferencePreset }
-    if ($ScriptBoundParameters.ContainsKey("ReferenceExclude")) { $multiviewParameters.ReferenceExclude = @($ReferenceExclude) }
-    if (-not [string]::IsNullOrWhiteSpace($OutputDir)) { $multiviewParameters.OutputDir = $OutputDir }
-
-    $diagnosticsRoot = Join-Path $AssetFactoryRoot "outputs\diagnostics\pipeline"
-    New-Item -ItemType Directory -Path $diagnosticsRoot -Force | Out-Null
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
-    $temporaryLog = Join-Path $diagnosticsRoot ("run-image-to-3d-{0}-{1}.log" -f $AssetId, $stamp)
-
-    Write-AFInfo "Mode : multi-vues"
-    Write-AFInfo "Asset : $AssetId"
-    Write-AFInfo "Étape 1/2 : référence + vues multi-vues"
-    $multiviewResult = Invoke-AFCommand -Executable $MultiViewRunner -Parameters $multiviewParameters -LogPath $temporaryLog
-    Assert-StageSuccess $multiviewResult "Génération multi-vues"
-
-    $multiviewSummaryJson = Get-AFOutputValue $multiviewResult.Output "[RESULT_JSON] "
-    $multiviewSummary = $multiviewSummaryJson | ConvertFrom-Json
-    $generationRoot = [string]$multiviewSummary.generationRoot
-    if ([string]::IsNullOrWhiteSpace($generationRoot)) {
-        throw "Le runner multi-vues n’a pas renvoyé de generationRoot."
-    }
-    $layout = Get-AFGenerationLayout -GenerationRoot $generationRoot
-    $pipelineStageOneLog = Join-Path $layout.LogsDir "run-image-to-3d-multiview.log"
-    try { Move-Item -LiteralPath $temporaryLog -Destination $pipelineStageOneLog -Force } catch { }
-
-    $geometryParameters = @{
-        GenerationRoot = $generationRoot
-        TargetHeight = $TargetHeight
-    }
-    if ($ScriptBoundParameters.ContainsKey("FusionMode")) { $geometryParameters.FusionMode = $FusionMode }
-    if ($ScriptBoundParameters.ContainsKey("ViewPolicy")) { $geometryParameters.ViewPolicy = $ViewPolicy }
-    if ($null -ne $MaxViews) { $geometryParameters.MaxViews = $MaxViews }
-    if ($null -ne $MinViewScore) { $geometryParameters.MinViewScore = $MinViewScore }
-    if ($ScriptBoundParameters.ContainsKey("TrellisSimplify")) { $geometryParameters.Simplify = $TrellisSimplify }
-    if ($ScriptBoundParameters.ContainsKey("TrellisTextureSize")) { $geometryParameters.TextureSize = $TrellisTextureSize }
-    if (-not [string]::IsNullOrWhiteSpace($MultiviewGeometryMethod)) { $geometryParameters.Method = $MultiviewGeometryMethod }
-    if (-not [string]::IsNullOrWhiteSpace($MultiviewGeometryProfile)) { $geometryParameters.MethodProfile = $MultiviewGeometryProfile }
-    if ($null -ne $IncludeReference) { $geometryParameters.IncludeReference = $IncludeReference }
-    if (@($ViewIndices).Count -gt 0) { $geometryParameters.ViewIndices = @($ViewIndices) }
-    if ($ScriptBoundParameters.ContainsKey("Seed")) { $geometryParameters.Seed = $Seed }
-    if (-not [string]::IsNullOrWhiteSpace($ProjectProfile)) { $geometryParameters.ProjectProfile = $ProjectProfile }
-    if (-not [string]::IsNullOrWhiteSpace($Category)) { $geometryParameters.Category = $Category }
-    if ($null -ne $AutoImport) { $geometryParameters.AutoImport = $AutoImport }
-    if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) { $geometryParameters.BlenderPath = $BlenderPath }
-    $geometryParameters.Postprocess = $Postprocess
-
-    Write-AFInfo "Étape 2/2 : TRELLIS multi-image + Blender + post-process + Unreal"
-    $geometryLog = Join-Path $layout.LogsDir "run-image-to-3d-geometry.log"
-    $geometryResult = Invoke-AFCommand -Executable $MultiViewGeometryRunner -Parameters $geometryParameters -LogPath $geometryLog
-    Assert-StageSuccess $geometryResult "Reconstruction 3D multi-vues"
-
-    $geometrySummaryJson = Get-AFOutputValue $geometryResult.Output "[RESULT_JSON] "
-    $geometrySummary = $geometrySummaryJson | ConvertFrom-Json
-
-    Write-AFOk "Pipeline multi-vues terminé"
-    Write-AFOk "Asset : $AssetId"
-    Write-AFOk "Version : $($multiviewSummary.assetVersion)"
-    Write-AFOk "Génération : $generationRoot"
-    Write-AFOk "Modèle final : $($geometrySummary.meshPath)"
-    if ([string]$geometrySummary.unrealStatus -eq "completed") {
-        Write-AFOk "Import Unreal : terminé"
-    } elseif ([string]$geometrySummary.unrealStatus -eq "skipped") {
-        Write-AFInfo "Import Unreal : désactivé"
-    } elseif ([string]$geometrySummary.unrealStatus -eq "not-configured") {
-        Write-AFInfo "Import Unreal : non configuré"
-    }
-
-    $result = [ordered]@{
-        kind = "asset-factory-generation"
-        status = "completed"
-        mode = "multiview"
-        generationId = $multiviewSummary.generationId
-        assetId = $AssetId
-        assetVersion = $multiviewSummary.assetVersion
-        generationRoot = $generationRoot
-        engine = "trellis"
-        imagePath = $multiviewSummary.referencePath
-        meshPath = $geometrySummary.meshPath
-        metadataPath = $layout.GenerationMetadataPath
-        unrealStatus = $geometrySummary.unrealStatus
-        postprocessStatus = $geometrySummary.postprocessStatus
-        postprocessReportPath = $geometrySummary.postprocessReportPath
-        failedStage = $null
-    }
-    Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
-    return 0
 }
 
-if ($Mode -eq "multiview") {
-    try {
-        if ($ScriptBoundParameters.ContainsKey("Engine") -and $Engine.ToLowerInvariant() -ne "trellis") {
-            throw "Le mode multi-vues utilise TRELLIS. Supprimez -Engine ou utilisez -Engine trellis."
-        }
-        $Engine = "trellis"
-        $multiViewExitCode = Invoke-AFMultiViewCycle
-        exit $multiViewExitCode
+function Wait-AFComfyServer {
+    param(
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [int]$TimeoutSeconds = 180
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-AFComfyServer -BaseUrl $BaseUrl) { return }
+        Start-Sleep -Seconds 2
     }
-    catch {
-        Write-AFFail $_.Exception.Message
-        exit 1
+    throw "ComfyUI n'est pas devenu disponible sur $BaseUrl."
+}
+
+function Invoke-AFIntegratedMultiview {
+    param(
+        [Parameter(Mandatory)][string]$MeshPath,
+        [Parameter(Mandatory)][string]$PromptText,
+        [string]$NegativePromptText = "",
+        [Parameter(Mandatory)][string]$BlenderExecutable,
+        [Parameter(Mandatory)]$Layout,
+        [Parameter(Mandatory)][string]$AssetName
+    )
+
+    $vendorAddon = Join-Path $AssetFactoryRoot "vendor\AssetTexturing\assettexturing"
+    $driver = Join-Path $PSScriptRoot "internal\multiview_texture_driver.py"
+    $depsRoot = Join-Path $AssetFactoryRoot "cache\multiview\blender-python"
+    $comfyRoot = Join-Path $AssetFactoryRoot "engines\comfyui"
+    $comfyPython = Join-Path $comfyRoot ".venv\Scripts\python.exe"
+    $comfyMain = Join-Path $comfyRoot "main.py"
+
+    Assert-AFFile -Path $driver -Label "Driver Blender multi-vues"
+    Assert-AFFile -Path $comfyPython -Label "Python ComfyUI"
+    Assert-AFFile -Path $comfyMain -Label "ComfyUI main.py"
+    if (-not (Test-Path -LiteralPath $vendorAddon -PathType Container)) {
+        throw "Module Blender multi-vues absent : $vendorAddon. Lancez '.\setup-asset-factory.ps1 multiview install'."
+    }
+    if (-not (Test-Path -LiteralPath $depsRoot -PathType Container)) {
+        throw "Dépendances Blender multi-vues absentes. Lancez '.\setup-asset-factory.ps1 multiview install'."
+    }
+
+    $uri = [Uri]$ServerUrl
+    $baseUrl = "{0}://{1}:{2}" -f $uri.Scheme, $uri.Host, $uri.Port
+    $serverAddress = "{0}:{1}" -f $uri.Host, $uri.Port
+    $startedComfy = $false
+    $comfyProcess = $null
+
+    $runtimeRoot = Join-Path $Layout.Root "runtime\multiview"
+    $runtimeScripts = Join-Path $runtimeRoot "scripts"
+    $runtimeAddonParent = Join-Path $runtimeScripts "addons"
+    $runtimeAddon = Join-Path $runtimeAddonParent "assettexturing"
+    New-Item -ItemType Directory -Path $runtimeAddonParent -Force | Out-Null
+    if (Test-Path -LiteralPath $runtimeAddon) { Remove-Item -LiteralPath $runtimeAddon -Recurse -Force }
+    Copy-Item -LiteralPath $vendorAddon -Destination $runtimeAddon -Recurse -Force
+
+    $runRoot = Join-Path $Layout.Root "multiview"
+    New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
+    $resultPath = Join-Path $runRoot "multiview-result.json"
+    $configPath = Join-Path $runRoot "launch-config.json"
+    $finalBlend = Join-Path $Layout.FinalDir ($AssetName + ".blend")
+    $finalGlb = Join-Path $Layout.FinalDir ($AssetName + ".glb")
+
+    [ordered]@{
+        mesh = $MeshPath
+        asset_name = $AssetName
+        run_root = $runRoot
+        python_deps = $depsRoot
+        server = $serverAddress
+        checkpoint = $TextureCheckpoint
+        prompt = $PromptText
+        negative_prompt = $NegativePromptText
+        seed = $Seed
+        num_cameras = $MultiviewCameras
+        texture_resolution = $TextureResolution
+        mesh_regex = ".*"
+        exclude_mesh_names = @()
+        final_blend = $finalBlend
+        final_glb = $finalGlb
+        keep_projected_blend = $KeepProjectedBlend
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding UTF8
+
+    $oldUserScripts = $env:BLENDER_USER_SCRIPTS
+    $oldPythonPath = $env:PYTHONPATH
+    try {
+        if (-not (Test-AFComfyServer -BaseUrl $baseUrl)) {
+            if ($uri.Host -notin @("127.0.0.1", "localhost")) {
+                throw "Le démarrage automatique de ComfyUI est limité à localhost."
+            }
+            $comfyOut = Join-Path $Layout.LogsDir "multiview-comfyui.stdout.log"
+            $comfyErr = Join-Path $Layout.LogsDir "multiview-comfyui.stderr.log"
+            Write-AFInfo "Démarrage de ComfyUI pour le texturage multi-vues..."
+            $comfyProcess = Start-Process -FilePath $comfyPython `
+                -ArgumentList @("`"$comfyMain`"", "--lowvram", "--listen", $uri.Host, "--port", $uri.Port) `
+                -WorkingDirectory $comfyRoot `
+                -RedirectStandardOutput $comfyOut `
+                -RedirectStandardError $comfyErr `
+                -PassThru
+            $startedComfy = $true
+            Wait-AFComfyServer -BaseUrl $baseUrl -TimeoutSeconds 180
+        } else {
+            Write-AFInfo "Réutilisation de ComfyUI : $baseUrl"
+        }
+
+        $env:BLENDER_USER_SCRIPTS = $runtimeScripts
+        $env:PYTHONPATH = if ($oldPythonPath) {
+            "$depsRoot$([IO.Path]::PathSeparator)$oldPythonPath"
+        } else {
+            $depsRoot
+        }
+
+        $blenderOut = Join-Path $Layout.LogsDir "multiview-blender.stdout.log"
+        $blenderErr = Join-Path $Layout.LogsDir "multiview-blender.stderr.log"
+        Write-AFInfo "Multi-vues Blender : $MultiviewCameras caméra(s), projection séquentielle puis bake final."
+
+        $arguments = @(
+            "--online-mode",
+            "--python-use-system-env",
+            "--python-exit-code", "1",
+            "--python", "`"$driver`"",
+            "--",
+            "--config", "`"$configPath`""
+        )
+        $process = Start-Process -FilePath $BlenderExecutable `
+            -ArgumentList $arguments `
+            -RedirectStandardOutput $blenderOut `
+            -RedirectStandardError $blenderErr `
+            -PassThru `
+            -Wait
+
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            throw "Le texturage multi-vues n'a pas produit son résultat. Logs : $blenderOut / $blenderErr"
+        }
+        $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+        if ($result.status -ne "success") {
+            throw "Le texturage multi-vues a échoué : $($result.error)"
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "Blender a terminé avec le code $($process.ExitCode)."
+        }
+        return $result
+    }
+    finally {
+        $env:BLENDER_USER_SCRIPTS = $oldUserScripts
+        $env:PYTHONPATH = $oldPythonPath
+        if ($startedComfy -and $ReleaseComfyMemory -and $null -ne $comfyProcess -and -not $comfyProcess.HasExited) {
+            Stop-Process -Id $comfyProcess.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -406,6 +408,19 @@ try {
             logPath = (Join-Path $Layout.LogsDir "blender.log")
             error = $null
         }
+        multiview = [ordered]@{
+            enabled = ($Mode -eq "multiview")
+            status = $(if ($Mode -eq "multiview") { "pending" } else { "skipped" })
+            cameraCount = $MultiviewCameras
+            textureResolution = $TextureResolution
+            checkpoint = $TextureCheckpoint
+            finalBlendPath = $null
+            finalGlbPath = $null
+            projectedBlendPath = $null
+            bakedDir = $null
+            generatedImages = @()
+            error = $null
+        }
         postprocess = [ordered]@{
             mode = $Postprocess
             status = $(if ($Postprocess -eq "none") { "skipped" } else { "pending" })
@@ -531,23 +546,29 @@ try {
     Write-AFInfo "Génération 3D avec $($Engine.ToUpperInvariant())..."
 
     if ($Engine -eq "trellis") {
+        $trellisParameters = @{
+            InputPath = $ImagePath
+            AssetId = $AssetId
+            GenerationRoot = $Layout.Root
+            AssetVersion = $Layout.Version
+            Seed = $Seed
+            Simplify = $TrellisSimplify
+            TextureSize = $TrellisTextureSize
+            AutoImport = $false
+            PipelineManaged = $true
+        }
+        if ($Mode -eq "multiview") {
+            $trellisParameters.GeometryOnly = $true
+            Write-AFInfo "TRELLIS : géométrie seule (aucune UV/texture/bake TRELLIS)."
+        }
+
         $geometryResult = Invoke-AFCommand -Executable $GeometryRunner `
             -LogPath $GeometryStage.logPath `
             -SuppressConsolePatterns @(
                 '^\s*Remarque : inclusion du fichier :',
                 '^\s*Note: including file:'
             ) `
-            -Parameters @{
-                InputPath = $ImagePath
-                AssetId = $AssetId
-                GenerationRoot = $Layout.Root
-                AssetVersion = $Layout.Version
-                Seed = $Seed
-                Simplify = $TrellisSimplify
-                TextureSize = $TrellisTextureSize
-                AutoImport = $false
-                PipelineManaged = $true
-            }
+            -Parameters $trellisParameters
         Assert-StageSuccess $geometryResult "TRELLIS"
         $MeshPath = Join-Path $Layout.RawDir ($AssetId + ".glb")
         $GeometryStage.jobId = $GenerationId
@@ -582,7 +603,11 @@ try {
         "--target-height", $heightArgument
     )
     if ($Engine -eq "trellis") {
-        $ProcessedMeshPath = Join-Path $Layout.FinalDir ($AssetId + ".glb")
+        $ProcessedMeshPath = if ($Mode -eq "multiview") {
+            Join-Path $Layout.FinalDir ($AssetId + ".geometry.glb")
+        } else {
+            Join-Path $Layout.FinalDir ($AssetId + ".glb")
+        }
         $ImportSourcePath = $ProcessedMeshPath
         $blenderArguments += @("--output", $ProcessedMeshPath)
         $GenerationMetadata.blender.glbPath = $ProcessedMeshPath
@@ -613,6 +638,63 @@ try {
     $GenerationMetadata.blender.status = "completed"
     $GenerationMetadata.importSourcePath = $ImportSourcePath
     Save-AFJson $GenerationMetadata $GenerationMetadataPath
+
+    if ($Mode -eq "multiview") {
+        $Stage = "multiview"
+        $GenerationMetadata.multiview.status = "running"
+        Save-AFJson $GenerationMetadata $GenerationMetadataPath
+
+        try {
+            $textureText = $TexturePrompt
+            if ([string]::IsNullOrWhiteSpace($textureText) -and -not $UseExistingImage) {
+                $textureText = $Prompt
+            }
+            if ([string]::IsNullOrWhiteSpace($textureText)) {
+                throw "TexturePrompt est requis pour le mode multi-vues."
+            }
+
+            $multiviewResult = Invoke-AFIntegratedMultiview `
+                -MeshPath $ProcessedMeshPath `
+                -PromptText $textureText `
+                -NegativePromptText $TextureNegativePrompt `
+                -BlenderExecutable $BlenderExe `
+                -Layout $Layout `
+                -AssetName $AssetId
+
+            $previousGeometryPath = $ProcessedMeshPath
+            $ProcessedMeshPath = [string]$multiviewResult.final_glb
+            $ImportSourcePath = $ProcessedMeshPath
+
+            Assert-AFFile -Path $ProcessedMeshPath -Label "Final textured GLB"
+            Assert-AFFile -Path ([string]$multiviewResult.final_blend) -Label "Final Blender asset"
+
+            $GenerationMetadata.multiview.status = "completed"
+            $GenerationMetadata.multiview.finalBlendPath = [string]$multiviewResult.final_blend
+            $GenerationMetadata.multiview.finalGlbPath = [string]$multiviewResult.final_glb
+            $GenerationMetadata.multiview.projectedBlendPath = $multiviewResult.projected_blend
+            $GenerationMetadata.multiview.bakedDir = [string]$multiviewResult.baked_dir
+            $GenerationMetadata.multiview.generatedImages = @($multiviewResult.generated_images)
+            $GenerationMetadata.blender.processedMeshPath = $ProcessedMeshPath
+            $GenerationMetadata.blender.glbPath = $ProcessedMeshPath
+            $GenerationMetadata.importSourcePath = $ProcessedMeshPath
+
+            # The normalized geometry intermediate is only a handoff file.
+            # raw/<AssetId>.glb remains the persistent geometry checkpoint.
+            if ($previousGeometryPath -ne $ProcessedMeshPath -and
+                (Test-Path -LiteralPath $previousGeometryPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $previousGeometryPath -Force -ErrorAction SilentlyContinue
+            }
+
+            Save-AFJson $GenerationMetadata $GenerationMetadataPath
+            Write-AFOk "Texturage multi-vues Blender terminé : $ProcessedMeshPath"
+        }
+        catch {
+            $GenerationMetadata.multiview.status = "failed"
+            $GenerationMetadata.multiview.error = $_.Exception.Message
+            Save-AFJson $GenerationMetadata $GenerationMetadataPath
+            throw
+        }
+    }
 
     # 5. Controle qualite visuel optionnel. Une erreur QA ne detruit jamais l'asset valide.
     $Stage = "postprocess"
@@ -711,6 +793,9 @@ if ($null -ne $GenerationMetadata) {
         Write-AFOk "Image : $($GenerationMetadata.imagePath)"
         Write-AFOk "Modèle brut : $($GenerationMetadata.geometry.meshPath)"
         Write-AFOk "Modèle final : $($GenerationMetadata.importSourcePath)"
+        if ($Mode -eq "multiview") {
+            Write-AFOk "Blend final : $($GenerationMetadata.multiview.finalBlendPath)"
+        }
         Write-AFOk "Dimensions finales : $($GenerationMetadata.blender.finalWidthMeters) x $($GenerationMetadata.blender.finalDepthMeters) x $($GenerationMetadata.blender.finalHeightMeters) m"
         if ($GenerationMetadata.unreal.status -eq "completed") {
             Write-AFOk "Version Unreal : $($GenerationMetadata.unreal.assetVersion)"

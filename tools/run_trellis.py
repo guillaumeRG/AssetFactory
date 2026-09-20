@@ -196,31 +196,71 @@ def _run(args: argparse.Namespace) -> int:
         with Image.open(input_path) as source:
             images.append(source.copy())
 
-    # Ne décode que ce qui est nécessaire à l'export GLB. L'exemple officiel décode aussi
-    # un champ de radiance et génère trois vidéos ; omettre ces chemins réduit la VRAM
-    # et le calcul sur la cible Asset Factory d'environ 8 Gio sans modifier la génération
-    # du maillage/GS requise par to_glb().
+    # In multiview mode Asset Factory needs geometry only. Requesting only
+    # "mesh" avoids decoding the Gaussian representation and, crucially,
+    # avoids the TRELLIS UV/render/bake path. The Blender multiview stage owns
+    # all appearance generation and baking.
+    requested_formats = ["mesh"]
+    if not args.geometry_only or args.save_ply:
+        requested_formats.append("gaussian")
+
     if len(images) == 1:
         outputs = pipeline.run(
             images[0],
             seed=args.seed,
-            formats=["mesh", "gaussian"],
+            formats=requested_formats,
         )
     else:
         outputs = pipeline.run_multi_image(
             images,
             seed=args.seed,
-            formats=["mesh", "gaussian"],
+            formats=requested_formats,
             mode=args.multi_image_mode,
         )
 
-    glb = postprocessing_utils.to_glb(
-        outputs["gaussian"][0],
-        outputs["mesh"][0],
-        simplify=args.simplify,
-        texture_size=args.texture_size,
-    )
-    glb.export(str(output_glb))
+    if args.geometry_only:
+        import math
+        import trimesh
+
+        mesh = outputs["mesh"][0]
+        vertices = mesh.vertices.detach().cpu().numpy()
+        faces = mesh.faces.detach().cpu().numpy()
+
+        vertices, faces = postprocessing_utils.postprocess_mesh(
+            vertices,
+            faces,
+            simplify=args.simplify > 0,
+            simplify_ratio=args.simplify,
+            fill_holes=True,
+            fill_holes_max_hole_size=0.04,
+            fill_holes_max_hole_nbe=int(250 * math.sqrt(1.0 - args.simplify)),
+            fill_holes_resolution=1024,
+            fill_holes_num_views=1000,
+            verbose=True,
+        )
+        # TRELLIS mesh coordinates are Z-up, while glTF assets are Y-up.
+        # trimesh writes the supplied coordinates directly and does not add the
+        # Blender/glTF axis conversion for us. Without this conversion Blender
+        # imports the generated GLB on its side. Convert Z-up -> glTF Y-up here
+        # so Blender's normal glTF import restores the original Z-up geometry.
+        vertices_gltf = vertices[:, [0, 2, 1]].copy()
+        vertices_gltf[:, 2] *= -1.0
+
+        geometry = trimesh.Trimesh(
+            vertices=vertices_gltf,
+            faces=faces,
+            process=False,
+        )
+        geometry.export(str(output_glb))
+        print("[INFO] Export géométrie seule : axe glTF Y-up appliqué ; UV/rendu/bake TRELLIS ignorés.")
+    else:
+        glb = postprocessing_utils.to_glb(
+            outputs["gaussian"][0],
+            outputs["mesh"][0],
+            simplify=args.simplify,
+            texture_size=args.texture_size,
+        )
+        glb.export(str(output_glb))
 
     if args.save_ply:
         output_ply = output_dir / (output_stem + ".ply")
@@ -257,6 +297,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--check-models", action="store_true")
     parser.add_argument("--simplify", type=float, default=0.95)
     parser.add_argument("--texture-size", type=int, default=1024)
+    parser.add_argument("--geometry-only", action="store_true")
     parser.add_argument("--save-ply", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()

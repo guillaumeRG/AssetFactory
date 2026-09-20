@@ -22,7 +22,15 @@ param(
     [ValidateSet("trellis", "triposr")]
     [string]$GeometryMethod = "trellis",
 
-    [string]$MultiviewMethod = "none",
+    [bool]$Multiview = $false,
+    [ValidateRange(1, 100)]
+    [int]$MultiviewCameras = 8,
+    [ValidateRange(256, 8192)]
+    [int]$TextureResolution = 2048,
+    [string]$TextureCheckpoint = "RealVisXL_V5.0_fp16.safetensors",
+    [string]$TexturePrompt = "",
+    [string]$TextureNegativePrompt = "",
+    [bool]$KeepProjectedBlend = $false,
 
     [ValidateRange(0.001, 1000000.0)]
     [double]$TargetHeight = 1.0,
@@ -42,13 +50,6 @@ param(
     [ValidateSet(512, 1024, 2048)]
     [int]$TrellisTextureSize = 1024,
 
-    [string]$MultiviewProfile = "",
-    [string]$FusionMode = "",
-    [System.Nullable[bool]]$IncludeReference = $null,
-    [string]$ViewPolicy = "",
-    [System.Nullable[int]]$MaxViews = $null,
-    [System.Nullable[double]]$MinViewScore = $null,
-
     [ValidateSet("none", "qa")]
     [string]$Postprocess = "none",
     [string]$BlenderPath = ""
@@ -64,6 +65,9 @@ Import-Module (Join-Path $PSScriptRoot "internal\AssetFactory.Pipeline.psm1") -F
 try {
     Assert-AFFileStem -Name $AssetId
 
+    $effectiveTexturePrompt = if ([string]::IsNullOrWhiteSpace($TexturePrompt)) { $Prompt } else { $TexturePrompt }
+    $effectiveTextureNegativePrompt = if ([string]::IsNullOrWhiteSpace($TextureNegativePrompt)) { $NegativePrompt } else { $TextureNegativePrompt }
+
     $result = Invoke-AFAssetPipeline `
         -InputKind Prompt `
         -Prompt $Prompt `
@@ -74,7 +78,13 @@ try {
         -Preset $Preset `
         -Exclude @($Exclude) `
         -GeometryMethod $GeometryMethod `
-        -MultiviewMethod $MultiviewMethod `
+        -Multiview $Multiview `
+        -MultiviewCameras $MultiviewCameras `
+        -TextureResolution $TextureResolution `
+        -TextureCheckpoint $TextureCheckpoint `
+        -TexturePrompt $effectiveTexturePrompt `
+        -TextureNegativePrompt $effectiveTextureNegativePrompt `
+        -KeepProjectedBlend $KeepProjectedBlend `
         -TargetHeight $TargetHeight `
         -ProjectProfile $ProjectProfile `
         -Category $Category `
@@ -85,12 +95,6 @@ try {
         -ServerUrl $ServerUrl `
         -TimeoutSeconds $TimeoutSeconds `
         -ReleaseComfyMemory $ReleaseComfyMemory `
-        -MultiviewProfile $MultiviewProfile `
-        -FusionMode $FusionMode `
-        -IncludeReference $IncludeReference `
-        -ViewPolicy $ViewPolicy `
-        -MaxViews $MaxViews `
-        -MinViewScore $MinViewScore `
         -Postprocess $Postprocess `
         -BlenderPath $BlenderPath
 

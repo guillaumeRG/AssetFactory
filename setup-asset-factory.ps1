@@ -9,7 +9,7 @@ param(
     [ValidateSet("install", "status", "doctor", "repair", "smoke", "model-install", "model-status", "runtime-install", "runtime-status", "runtime-doctor", "native-install", "native-status", "native-doctor")]
     [string]$EngineCommand = "status",
 
-    [string]$Method = "zero123plus-v1.1",
+    [string]$Method = "projection",
 
     [switch]$NoInstall
 )
@@ -143,30 +143,15 @@ $ComfyUiFluxModelsDir = Join-Path $ComfyUiRoot "models\checkpoints"
 $ComfyUiFluxModelPath = Join-Path $ComfyUiFluxModelsDir $ComfyUiFluxFileName
 
 # Configuration des méthodes image-vers-multi-vues. La première implémentation
-# utilise Zero123++ v1.1 dans un environnement isolé. Le registre versionné
-# config/multiview-methods.json reste la source de vérité côté orchestration.
-$MultiViewDefaultMethod = "zero123plus-v1.1"
-$Zero123PlusRepoUrl = "https://github.com/SUDO-AI-3D/zero123plus.git"
-$Zero123PlusPinnedCommit = "7d0315c31be6eb906b34cf07d91310f8e12e9b95"
-$Zero123PlusRoot = Join-Path $ProjectRoot "engines\zero123plus"
-$Zero123PlusVenv = Join-Path $Zero123PlusRoot ".venv"
-$Zero123PlusVenvPython = Join-Path $Zero123PlusVenv "Scripts\python.exe"
-$Zero123PlusPythonVersion = "3.11"
-$Zero123PlusTorchVersion = "2.13.0"
-$Zero123PlusTorchIndexUrl = "https://download.pytorch.org/whl/cu130"
-$Zero123PlusExpectedTorchCuda = "13.0"
-$Zero123PlusModelRoot = Join-Path $ProjectRoot "models\multiview\zero123plus-v1.1"
-$MultiViewModelHelper = Join-Path $ProjectRoot "tools\multiview_models.py"
-$Zero123PlusPackages = @(
-    "diffusers==0.20.2",
-    "transformers==4.29.2",
-    "accelerate==0.23.0",
-    "huggingface_hub==0.19.4",
-    "safetensors",
-    "pillow",
-    "numpy<2"
-)
 
+# Le mode multi-vues réutilise ComfyUI et Blender déjà gérés par Asset Factory.
+# Aucun runtime de génération de vues 2D séparé n'est installé.
+$MultiViewDepsRoot = Join-Path $ProjectRoot "cache\multiview\blender-python"
+$MultiViewVendorRoot = Join-Path $ProjectRoot "vendor\AssetTexturing\assettexturing"
+$MultiViewDriver = Join-Path $ProjectRoot "tools\internal\multiview_texture_driver.py"
+$MultiViewCheckpoint = Join-Path $ComfyUiRoot "models\checkpoints\RealVisXL_V5.0_fp16.safetensors"
+$MultiViewDepthModel = Join-Path $ComfyUiRoot "models\controlnet\controlnet_depth_sdxl.safetensors"
+$MultiViewLightningLora = Join-Path $ComfyUiRoot "models\loras\sdxl_lightning_8step_lora.safetensors"
 
 function Write-Header {
     param([Parameter(Mandatory)][string]$Title)
@@ -4819,270 +4804,244 @@ function Invoke-ComfyUiCommand {
 }
 
 
-function Assert-MultiViewMethod {
-    if ([string]::IsNullOrWhiteSpace($Method)) {
-        $script:Method = $MultiViewDefaultMethod
-    }
-    if ($Method -ne "zero123plus-v1.1") {
-        throw "Méthode multi-vues non prise en charge par ce setup : '$Method'. Méthode disponible : zero123plus-v1.1."
-    }
+function Get-MultiViewBlenderPython {
+    $blender = Get-BlenderInfo
+    if (-not $blender.Installed) { return $null }
+
+    $root = Split-Path -Parent $blender.Path
+    $candidate = Get-ChildItem -LiteralPath $root -Filter python.exe -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match '\\python\\bin\\python\.exe$' } |
+        Select-Object -First 1
+    if ($null -eq $candidate) { return $null }
+    return $candidate.FullName
 }
 
-function Get-MultiViewPythonInfo {
-    $path = Get-PythonPathForVersion -Version $Zero123PlusPythonVersion
-    if ($path) {
-        return [pscustomobject]@{ Installed = $true; Version = $Zero123PlusPythonVersion; Path = $path }
-    }
-    return [pscustomobject]@{ Installed = $false; Version = $null; Path = $null }
-}
+function Ensure-MultiViewFile {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Label
+    )
 
-function Ensure-MultiViewPython {
-    $python = Get-MultiViewPythonInfo
-    if ($python.Installed) {
-        Write-Result "OK" "Python $($python.Version) disponible pour $Method - $($python.Path)"
-        return $python
-    }
-    if ($NoInstall) {
-        throw "$Method nécessite Python $Zero123PlusPythonVersion. -NoInstall interdit son installation."
-    }
-    Install-WingetPackage -Id "Python.Python.3.11" -DisplayName "Python 3.11 for Asset Factory multiview"
-    Refresh-ProcessPath
-    $python = Get-MultiViewPythonInfo
-    if (-not $python.Installed) {
-        throw "Python 3.11 a été installé mais reste introuvable. Ouvrez un nouveau terminal puis relancez 'multiview install'."
-    }
-    return $python
-}
-
-function Test-Zero123PlusRepository {
-    if (-not (Test-Path -LiteralPath $Zero123PlusRoot -PathType Container)) {
-        return [pscustomobject]@{ Valid = $false; State = "missing"; Origin = $null; Message = "engines\\zero123plus absent" }
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Zero123PlusRoot ".git") -PathType Container)) {
-        return [pscustomobject]@{ Valid = $false; State = "partial"; Origin = $null; Message = "engines\\zero123plus n'est pas un dépôt Git" }
-    }
-    $git = Get-GitInfo
-    if (-not $git.Installed) {
-        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Git indisponible" }
-    }
-    $originResult = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "remote", "get-url", "origin")
-    if ($originResult.ExitCode -ne 0 -or $originResult.Output.Count -eq 0) {
-        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Impossible de lire l'origine Zero123++" }
-    }
-    $origin = $originResult.Output[0].ToString().Trim()
-    if ((Normalize-GitRemoteUrl $origin) -ne (Normalize-GitRemoteUrl $Zero123PlusRepoUrl)) {
-        return [pscustomobject]@{ Valid = $false; State = "wrong-origin"; Origin = $origin; Message = "Origine Zero123++ inattendue" }
-    }
-    $pipeline = Join-Path $Zero123PlusRoot "diffusers-support\pipeline.py"
-    if (-not (Test-Path -LiteralPath $pipeline -PathType Leaf)) {
-        return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "diffusers-support\\pipeline.py absent" }
-    }
-    return [pscustomobject]@{ Valid = $true; State = "ready"; Origin = $origin; Message = "Dépôt Zero123++ officiel présent" }
-}
-
-function Ensure-Zero123PlusRepository {
-    $git = Get-GitInfo
-    if (-not $git.Installed) { throw "Git est requis pour installer Zero123++." }
-    $enginesDir = Join-Path $ProjectRoot "engines"
-    New-Item -ItemType Directory -Path $enginesDir -Force | Out-Null
-
-    $state = Test-Zero123PlusRepository
-    if ($state.State -eq "missing") {
-        Write-Result "INFO" "Clonage de Zero123++..."
-        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $Zero123PlusRepoUrl, $Zero123PlusRoot)
-        if ($clone.ExitCode -ne 0) { throw "Échec du clonage Zero123++ : $($clone.Output -join ' | ')" }
-    } elseif (-not $state.Valid) {
-        throw "Dépôt Zero123++ invalide : $($state.Message). Rien n'a été supprimé."
-    }
-
-    $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "status", "--porcelain", "--untracked-files=no")
-    if ($dirty.ExitCode -ne 0) { throw "Impossible de vérifier l'état du dépôt Zero123++." }
-    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "rev-parse", "HEAD")
-    if ($head.ExitCode -ne 0 -or $head.Output.Count -eq 0) { throw "Impossible de lire le HEAD Zero123++." }
-    if ($head.Output[0].ToString().Trim() -ne $Zero123PlusPinnedCommit) {
-        if ($dirty.Output.Count -gt 0) { throw "Le checkout Zero123++ contient des modifications suivies ; refus de changer de révision." }
-        $fetch = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "fetch", "origin", $Zero123PlusPinnedCommit)
-        if ($fetch.ExitCode -ne 0) { throw "Impossible de récupérer la révision Zero123++ épinglée : $($fetch.Output -join ' | ')" }
-        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "checkout", "--detach", $Zero123PlusPinnedCommit)
-        if ($checkout.ExitCode -ne 0) { throw "Impossible d'activer la révision Zero123++ épinglée : $($checkout.Output -join ' | ')" }
-    }
-    $verify = Test-Zero123PlusRepository
-    if (-not $verify.Valid) { throw "Validation du dépôt Zero123++ échouée : $($verify.Message)" }
-    Write-Result "OK" "Zero123++ prêt à la révision $($Zero123PlusPinnedCommit.Substring(0, 7))"
-}
-
-function Ensure-MultiViewVenv {
-    if (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf) {
-        $probe = Invoke-NativeCapture -Executable $Zero123PlusVenvPython -Arguments @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        if ($probe.ExitCode -eq 0 -and $probe.Output.Count -gt 0 -and $probe.Output[0].ToString().Trim() -eq $Zero123PlusPythonVersion) {
-            Write-Result "OK" "Environnement virtuel multi-vues Python $Zero123PlusPythonVersion réutilisé"
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+        $item = Get-Item -LiteralPath $Destination
+        if ($item.Length -gt 10MB) {
+            Write-Result "OK" "$Label déjà présent"
             return
         }
-        if ($NoInstall) { throw "Environnement virtuel multi-vues invalide et -NoInstall actif." }
-        Remove-Item -LiteralPath $Zero123PlusVenv -Recurse -Force
-    } elseif (Test-Path -LiteralPath $Zero123PlusVenv) {
-        if ($NoInstall) { throw "Environnement virtuel multi-vues incomplet et -NoInstall actif." }
-        Remove-Item -LiteralPath $Zero123PlusVenv -Recurse -Force
+        if ($NoInstall) { throw "$Label est incomplet : $Destination" }
+        Remove-Item -LiteralPath $Destination -Force
     }
+    if ($NoInstall) { throw "$Label absent : $Destination" }
 
-    $python = Ensure-MultiViewPython
-    $create = Invoke-NativeCapture -Executable $python.Path -Arguments @("-m", "venv", $Zero123PlusVenv)
-    if ($create.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
-        throw "Impossible de créer l'environnement virtuel multi-vues : $($create.Output -join ' | ')"
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($null -eq $curl) { throw "curl.exe est requis pour télécharger $Label." }
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+    $partial = "$Destination.partial"
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    Write-Result "INFO" "Téléchargement : $Label"
+    & $curl.Source -L --fail --retry 3 --retry-delay 3 --output $partial $Uri
+    if ($LASTEXITCODE -ne 0) { throw "Téléchargement échoué : $Label" }
+    if ((Get-Item -LiteralPath $partial).Length -lt 10MB) {
+        throw "Fichier téléchargé anormalement petit : $Label"
     }
-    Write-Result "OK" "Environnement virtuel multi-vues créé"
+    Move-Item -LiteralPath $partial -Destination $Destination -Force
+    Write-Result "OK" "$Label prêt"
 }
 
-function Invoke-MultiViewPython {
-    param([Parameter(Mandatory)][string[]]$Arguments)
-    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
-        throw "Environnement multi-vues absent. Lancez '.\\setup-asset-factory.ps1 multiview install'."
+function Ensure-MultiViewBlenderDependencies {
+    param([switch]$CheckOnly)
+
+    $blender = Get-BlenderInfo
+    if (-not $blender.Installed) {
+        if ($NoInstall) { throw "Blender est requis pour le mode multi-vues." }
+        Install-WingetPackage -Id "BlenderFoundation.Blender" -DisplayName "Blender"
+        Refresh-ProcessPath
+        $blender = Get-BlenderInfo
+        if (-not $blender.Installed) { throw "Blender reste introuvable après installation." }
     }
-    return Invoke-NativeCapture -Executable $Zero123PlusVenvPython -Arguments $Arguments -WorkingDirectory $ProjectRoot
+
+    $python = Get-MultiViewBlenderPython
+    if ([string]::IsNullOrWhiteSpace($python)) {
+        throw "Python embarqué de Blender introuvable sous $($blender.Path)."
+    }
+
+    New-Item -ItemType Directory -Path $MultiViewDepsRoot -Force | Out-Null
+    & $python -m pip --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        if ($CheckOnly -or $NoInstall) {
+            throw "pip est absent de Python Blender."
+        }
+        & $python -m ensurepip --upgrade | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Impossible d'activer pip dans Python Blender." }
+    }
+
+    # L'installation ne doit avoir lieu que pendant install/repair.
+    # Le doctor valide l'environnement existant sans relancer pip.
+    if (-not $CheckOnly -and -not $NoInstall) {
+        & $python -m pip install --disable-pip-version-check --upgrade --target $MultiViewDepsRoot "requests==2.32.3" | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Installation de requests pour Blender échouée." }
+
+        & $python -m pip install --disable-pip-version-check --upgrade --no-deps --target $MultiViewDepsRoot `
+            "websocket-client==1.8.0" `
+            "imageio==2.37.0" `
+            "imageio-ffmpeg==0.6.0" `
+            "opencv-python-headless==4.11.0.86" `
+            "pillow==11.2.1" | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Installation des dépendances Blender multi-vues échouée." }
+    }
+
+    $oldPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = $MultiViewDepsRoot
+        & $python -c "import cv2, imageio, imageio_ffmpeg, requests, websocket; from PIL import Image; print('OK')" | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Validation des dépendances Blender multi-vues échouée." }
+    }
+    finally {
+        $env:PYTHONPATH = $oldPythonPath
+    }
+    Write-Result "OK" "Dépendances Blender multi-vues validées"
 }
 
-function Ensure-MultiViewPackages {
-    $pip = Invoke-MultiViewPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-    if ($pip.ExitCode -ne 0) { throw "Mise à jour de pip impossible : $($pip.Output -join ' | ')" }
+function Ensure-MultiViewModels {
+    Ensure-MultiViewFile `
+        -Uri "https://huggingface.co/ByteDance/SDXL-Lightning/resolve/main/sdxl_lightning_8step_lora.safetensors?download=true" `
+        -Destination $MultiViewLightningLora `
+        -Label "SDXL Lightning 8-step LoRA"
 
-    $torchProbe = Invoke-MultiViewPython -Arguments @("-c", "import torch, torchvision; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())")
-    $needTorch = $true
-    if ($torchProbe.ExitCode -eq 0 -and $torchProbe.Output.Count -ge 3) {
-        $torchVersion = $torchProbe.Output[0].ToString().Split('+')[0]
-        $cudaVersion = $torchProbe.Output[1].ToString().Trim()
-        $cudaAvailable = $torchProbe.Output[2].ToString().Trim().ToLowerInvariant() -eq "true"
-        if ($torchVersion -eq $Zero123PlusTorchVersion -and $cudaVersion -eq $Zero123PlusExpectedTorchCuda -and $cudaAvailable) {
-            $needTorch = $false
+    Ensure-MultiViewFile `
+        -Uri "https://huggingface.co/xinsir/controlnet-depth-sdxl-1.0/resolve/main/diffusion_pytorch_model.safetensors?download=true" `
+        -Destination $MultiViewDepthModel `
+        -Label "Depth ControlNet SDXL"
+
+    Ensure-MultiViewFile `
+        -Uri "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors?download=true" `
+        -Destination $MultiViewCheckpoint `
+        -Label "RealVisXL V5.0 fp16"
+}
+
+function Test-MultiViewModelFiles {
+    $missing = @()
+    foreach ($item in @(
+        @{ Path = $MultiViewCheckpoint; Label = "RealVisXL V5.0 fp16" },
+        @{ Path = $MultiViewDepthModel; Label = "Depth ControlNet SDXL" },
+        @{ Path = $MultiViewLightningLora; Label = "SDXL Lightning 8-step LoRA" }
+    )) {
+        if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf) -or
+            (Get-Item -LiteralPath $item.Path).Length -lt 10MB) {
+            $missing += $item.Label
         }
     }
-    if ($needTorch) {
-        if ($NoInstall) { throw "PyTorch CUDA attendu absent de l'environnement multi-vues et -NoInstall actif." }
-        Write-Result "INFO" "Installation de PyTorch $Zero123PlusTorchVersion / CUDA $Zero123PlusExpectedTorchCuda..."
-        $torchInstall = Invoke-MultiViewPython -Arguments @("-m", "pip", "install", "torch==$Zero123PlusTorchVersion", "torchvision", "--index-url", $Zero123PlusTorchIndexUrl)
-        if ($torchInstall.ExitCode -ne 0) { throw "Installation PyTorch multi-vues échouée : $($torchInstall.Output -join ' | ')" }
-    }
-
-    if (-not $NoInstall) {
-        $args = @("-m", "pip", "install") + $Zero123PlusPackages
-        $deps = Invoke-MultiViewPython -Arguments $args
-        if ($deps.ExitCode -ne 0) { throw "Installation des dépendances multi-vues échouée : $($deps.Output -join ' | ')" }
-    }
-
-    $verify = Invoke-MultiViewPython -Arguments @(
-        "-c",
-        "import torch, torchvision, diffusers, transformers, huggingface_hub, PIL; assert torch.cuda.is_available(); assert torch.version.cuda == '$Zero123PlusExpectedTorchCuda'; print(torch.__version__); print(diffusers.__version__); print(transformers.__version__)"
-    )
-    if ($verify.ExitCode -ne 0) { throw "Validation des dépendances multi-vues échouée : $($verify.Output -join ' | ')" }
-    Write-Result "OK" "Runtime multi-vues validé"
-}
-
-function Get-MultiViewModelState {
-    if (-not (Test-Path -LiteralPath $MultiViewModelHelper -PathType Leaf)) {
-        return [pscustomobject]@{ Valid = $false; Message = "tools\\multiview_models.py absent" }
-    }
-    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
-        return [pscustomobject]@{ Valid = $false; Message = "venv multi-vues absent" }
-    }
-    $check = Invoke-MultiViewPython -Arguments @("-B", $MultiViewModelHelper, "check", "--method", $Method, "--root", $Zero123PlusModelRoot)
-    return [pscustomobject]@{ Valid = ($check.ExitCode -eq 0); Message = ($check.Output -join " | ") }
-}
-
-function Invoke-MultiViewModelInstall {
-    Assert-MultiViewMethod
-    Write-Header "Multi-vues Model Install"
-    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
-        throw "Runtime multi-vues absent. Lancez '.\\setup-asset-factory.ps1 multiview install' d'abord."
-    }
-    if ($NoInstall) {
-        $state = Get-MultiViewModelState
-        if (-not $state.Valid) { throw "Modèle multi-vues invalide : $($state.Message)" }
-        Write-Result "OK" "Modèle $Method validé localement"
-        return
-    }
-    Write-Result "INFO" "Téléchargement/vérification du modèle $Method..."
-    $result = Invoke-MultiViewPython -Arguments @("-B", $MultiViewModelHelper, "install", "--method", $Method, "--root", $Zero123PlusModelRoot)
-    if ($result.ExitCode -ne 0) { throw "Installation du modèle multi-vues échouée : $($result.Output -join ' | ')" }
-    Write-Result "OK" "Modèle $Method prêt : $Zero123PlusModelRoot"
+    return $missing
 }
 
 function Show-MultiViewStatus {
-    Assert-MultiViewMethod
     Write-Header "Multi-vues Status"
-    $repo = Test-Zero123PlusRepository
-    if ($repo.Valid) {
-        $git = Get-GitInfo
-        $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $Zero123PlusRoot, "rev-parse", "HEAD")
-        $headValue = if ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0) { $head.Output[0].ToString().Trim() } else { "inconnu" }
-        if ($headValue -eq $Zero123PlusPinnedCommit) { Write-Result "OK" "Zero123++ source : $($headValue.Substring(0, 7))" }
-        else { Write-Result "WARN" "Zero123++ source : $headValue / attendu $($Zero123PlusPinnedCommit.Substring(0,7))" }
+    if (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container) {
+        Write-Result "OK" "Module Blender multi-vues présent"
     } else {
-        Write-Result "MISSING" $repo.Message
+        Write-Result "MISSING" "Module Blender multi-vues absent"
     }
-    if (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf) {
-        Write-Result "OK" "Venv : $Zero123PlusVenvPython"
+    if (Test-Path -LiteralPath $MultiViewDriver -PathType Leaf) {
+        Write-Result "OK" "Driver interne présent"
     } else {
-        Write-Result "MISSING" "Environnement virtuel multi-vues"
+        Write-Result "MISSING" "Driver interne absent"
     }
-    $model = Get-MultiViewModelState
-    if ($model.Valid) { Write-Result "OK" "Modèle $Method local validé" }
-    else { Write-Result "MISSING" "Modèle $Method non prêt. Utilisez 'multiview model-install'." }
+    if ((Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf) -and (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf)) {
+        Write-Result "OK" "ComfyUI disponible"
+    } else {
+        Write-Result "MISSING" "ComfyUI incomplet"
+    }
+    $blender = Get-BlenderInfo
+    if ($blender.Installed) { Write-Result "OK" "Blender : $($blender.Path)" }
+    else { Write-Result "MISSING" "Blender" }
+
+    $missing = @(Test-MultiViewModelFiles)
+    if ($missing.Count -eq 0) { Write-Result "OK" "Modèles multi-vues prêts" }
+    else { Write-Result "MISSING" ("Modèles manquants : " + ($missing -join ", ")) }
 }
 
 function Invoke-MultiViewDoctor {
-    Assert-MultiViewMethod
     Write-Header "Multi-vues Doctor"
     $failures = 0
-    $repo = Test-Zero123PlusRepository
-    if (-not $repo.Valid) { Write-Result "FAIL" $repo.Message; $failures++ }
-    else { Write-Result "OK" "Dépôt Zero123++ valide" }
-    if (-not (Test-Path -LiteralPath $Zero123PlusVenvPython -PathType Leaf)) {
-        Write-Result "FAIL" "Venv multi-vues absent"; $failures++
-    } else {
-        $probe = Invoke-MultiViewPython -Arguments @("-c", "import torch, diffusers, transformers; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0)); print(diffusers.__version__)")
-        if ($probe.ExitCode -ne 0) { Write-Result "FAIL" "Runtime multi-vues invalide : $($probe.Output -join ' | ')"; $failures++ }
-        else { Write-Result "OK" "Runtime CUDA multi-vues opérationnel" }
+
+    if (-not (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container)) {
+        Write-Result "FAIL" "Module Blender multi-vues absent"; $failures++
+    } else { Write-Result "OK" "Module Blender multi-vues présent" }
+
+    if (-not (Test-Path -LiteralPath $MultiViewDriver -PathType Leaf)) {
+        Write-Result "FAIL" "Driver interne absent"; $failures++
+    } else { Write-Result "OK" "Driver interne présent" }
+
+    if ((-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) -or
+        (-not (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf))) {
+        Write-Result "FAIL" "ComfyUI incomplet"; $failures++
+    } else { Write-Result "OK" "ComfyUI disponible" }
+
+    $missing = @(Test-MultiViewModelFiles)
+    if ($missing.Count -gt 0) {
+        Write-Result "FAIL" ("Modèles manquants : " + ($missing -join ", ")); $failures++
+    } else { Write-Result "OK" "Modèles multi-vues prêts" }
+
+    try {
+        Ensure-MultiViewBlenderDependencies -CheckOnly
+    } catch {
+        Write-Result "FAIL" $_.Exception.Message
+        $failures++
     }
-    $model = Get-MultiViewModelState
-    if (-not $model.Valid) { Write-Result "FAIL" "Modèle $Method absent ou invalide"; $failures++ }
-    else { Write-Result "OK" "Modèle $Method local validé" }
+
     if ($failures -gt 0) { return 1 }
-    Write-Result "OK" "Méthode multi-vues prête"
+    Write-Result "OK" "Pipeline multi-vues prêt"
     return 0
 }
 
 function Invoke-MultiViewInstall {
-    Assert-MultiViewMethod
     Write-Header "Multi-vues Install"
     Assert-BootstrapHost
-    if ($NoInstall) {
-        $exitCode = Invoke-MultiViewDoctor
-        if ($exitCode -ne 0) { throw "Validation multi-vues échouée avec -NoInstall." }
-        return
+
+    if ((-not (Test-Path -LiteralPath $ComfyUiVenvPython -PathType Leaf)) -or
+        (-not (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf))) {
+        if ($NoInstall) {
+            throw "ComfyUI est absent et -NoInstall est actif."
+        }
+        Write-Result "INFO" "ComfyUI requis : installation/réparation..."
+        Invoke-ComfyUiInstall
     }
-    $git = Get-GitInfo
-    if (-not $git.Installed) { Install-WingetPackage -Id "Git.Git" -DisplayName "Git"; Refresh-ProcessPath }
-    $gpu = Get-NvidiaInfo
-    if (-not $gpu.Available) { throw "GPU NVIDIA introuvable avec nvidia-smi." }
-    Write-Result "OK" "GPU NVIDIA : $($gpu.Name), $($gpu.VramMiB) MiB VRAM"
-    Ensure-Zero123PlusRepository
-    Ensure-MultiViewVenv
-    Ensure-MultiViewPackages
-    Write-Result "OK" "Runtime de $Method installé. Utilisez ensuite 'multiview model-install'."
+
+    if (-not (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container)) {
+        throw "Le module Blender multi-vues fourni avec Asset Factory est absent : $MultiViewVendorRoot"
+    }
+    if (-not (Test-Path -LiteralPath $MultiViewDriver -PathType Leaf)) {
+        throw "Driver interne multi-vues absent : $MultiViewDriver"
+    }
+
+    Ensure-MultiViewBlenderDependencies
+    Ensure-MultiViewModels
+
+    $doctorOutput = @(Invoke-MultiViewDoctor)
+    $exitCode = if ($doctorOutput.Count -gt 0) { [int]$doctorOutput[-1] } else { 1 }
+    if ($exitCode -ne 0) { throw "Validation multi-vues échouée après installation." }
+    Write-Result "OK" "Mode multi-vues installé"
 }
 
 function Invoke-MultiViewCommand {
-    Assert-MultiViewMethod
     switch ($EngineCommand) {
         "install" { Invoke-MultiViewInstall }
         "status" { Show-MultiViewStatus }
-        "doctor" { $exitCode = Invoke-MultiViewDoctor; if ($exitCode -ne 0) { exit $exitCode } }
-        "model-install" { Invoke-MultiViewModelInstall }
-        "model-status" {
-            $state = Get-MultiViewModelState
-            if ($state.Valid) { Write-Result "OK" "Modèle $Method local validé" }
-            else { Write-Result "MISSING" $state.Message; exit 1 }
+        "doctor" {
+            $doctorOutput = @(Invoke-MultiViewDoctor)
+            $exitCode = if ($doctorOutput.Count -gt 0) { [int]$doctorOutput[-1] } else { 1 }
+            if ($exitCode -ne 0) { exit $exitCode }
         }
         "repair" { Invoke-MultiViewInstall }
+        # Conservés comme alias de compatibilité : les trois modèles sont un seul bundle.
+        "model-install" { Invoke-MultiViewInstall }
+        "model-status" {
+            $missing = @(Test-MultiViewModelFiles)
+            if ($missing.Count -eq 0) { Write-Result "OK" "Modèles multi-vues prêts" }
+            else { Write-Result "MISSING" ($missing -join ", "); exit 1 }
+        }
         default { throw "Sous-commande '$EngineCommand' non prise en charge pour multiview." }
     }
 }
@@ -5369,10 +5328,10 @@ Usage:
   .\setup-asset-factory.ps1 comfyui smoke
   .\setup-asset-factory.ps1 comfyui repair
   .\setup-asset-factory.ps1 comfyui model-install
-  .\setup-asset-factory.ps1 multiview install -Method zero123plus-v1.1
-  .\setup-asset-factory.ps1 multiview model-install -Method zero123plus-v1.1
-  .\setup-asset-factory.ps1 multiview status -Method zero123plus-v1.1
-  .\setup-asset-factory.ps1 multiview doctor -Method zero123plus-v1.1
+
+
+
+
   .\setup-asset-factory.ps1 trellis install
   .\setup-asset-factory.ps1 trellis status
   .\setup-asset-factory.ps1 trellis doctor
@@ -5395,7 +5354,7 @@ Commands:
   doctor    Run smoke tests for Git, Python, Blender headless, GPU query and repository structure.
   triposr   Manage the isolated TripoSR engine. Subcommands: install, status, doctor, repair, smoke.
   comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair, model-install.
-  multiview Manage optional image-to-multiview methods. The first provider is Zero123++ v1.1.
+  multiview Install/validate the integrated Blender multiview texturing path.
   trellis   Manage TRELLIS v1. AF-08A handles the pinned official repo/bootstrap venv;
             AF-08B runtime-* handles the isolated Python 3.12 / PyTorch CUDA 13 runtime foundation;
             AF-08C native-* validates CUDA/MSVC/sm_120, PyTorch SDPA and required TRELLIS native extensions.
@@ -5409,7 +5368,7 @@ Important:
   - TripoSR is opt-in: use `triposr install`; it never installs packages into global Python.
   - ComfyUI is opt-in: use `comfyui install`; it uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
   - The FLUX Schnell checkpoint is opt-in: use `comfyui model-install`; an existing valid checkpoint is reused.
-  - Multi-view generation is opt-in and isolated; use `multiview install`, then `multiview model-install`.
+  - Multi-view texturing is opt-in; use `multiview install`, then enable -Multiview `$true in the normal generation command.
   - TRELLIS v1 is pinned to a validated source revision and uses separate bootstrap/runtime venvs.
   - TRELLIS runtime PyTorch CUDA 13 is isolated; the system CUDA Toolkit used by other engines is not replaced.
   - AF-08C uses PyTorch SDPA on Blackwell. Upstream TRELLIS 442aa1e has no sparse SDPA backend; unsupported xformers builds are removed rather than selected.

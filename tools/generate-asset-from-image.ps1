@@ -9,10 +9,18 @@ param(
     [ValidateSet("trellis", "triposr")]
     [string]$GeometryMethod = "trellis",
 
-    [string]$MultiviewMethod = "none",
-
     [ValidateRange(0, [long]::MaxValue)]
     [long]$Seed = 0,
+
+    [bool]$Multiview = $false,
+    [ValidateRange(1, 100)]
+    [int]$MultiviewCameras = 8,
+    [ValidateRange(256, 8192)]
+    [int]$TextureResolution = 2048,
+    [string]$TextureCheckpoint = "RealVisXL_V5.0_fp16.safetensors",
+    [string]$TexturePrompt = "",
+    [string]$TextureNegativePrompt = "",
+    [bool]$KeepProjectedBlend = $false,
 
     [ValidateRange(0.001, 1000000.0)]
     [double]$TargetHeight = 1.0,
@@ -25,13 +33,6 @@ param(
     [double]$TrellisSimplify = 0.95,
     [ValidateSet(512, 1024, 2048)]
     [int]$TrellisTextureSize = 1024,
-
-    [string]$MultiviewProfile = "",
-    [string]$FusionMode = "",
-    [System.Nullable[bool]]$IncludeReference = $null,
-    [string]$ViewPolicy = "",
-    [System.Nullable[int]]$MaxViews = $null,
-    [System.Nullable[double]]$MinViewScore = $null,
 
     [ValidateSet("none", "qa")]
     [string]$Postprocess = "none",
@@ -57,25 +58,29 @@ try {
     }
     Assert-AFFileStem -Name $AssetId
 
+    if ($Multiview -and [string]::IsNullOrWhiteSpace($TexturePrompt)) {
+        throw "-TexturePrompt est requis avec -Multiview `$true pour une entrée image."
+    }
+
     $result = Invoke-AFAssetPipeline `
         -InputKind Image `
         -InputPath $resolvedInput `
         -AssetId $AssetId `
         -Seed $Seed `
         -GeometryMethod $GeometryMethod `
-        -MultiviewMethod $MultiviewMethod `
+        -Multiview $Multiview `
+        -MultiviewCameras $MultiviewCameras `
+        -TextureResolution $TextureResolution `
+        -TextureCheckpoint $TextureCheckpoint `
+        -TexturePrompt $TexturePrompt `
+        -TextureNegativePrompt $TextureNegativePrompt `
+        -KeepProjectedBlend $KeepProjectedBlend `
         -TargetHeight $TargetHeight `
         -ProjectProfile $ProjectProfile `
         -Category $Category `
         -AutoImport $AutoImport `
         -TrellisSimplify $TrellisSimplify `
         -TrellisTextureSize $TrellisTextureSize `
-        -MultiviewProfile $MultiviewProfile `
-        -FusionMode $FusionMode `
-        -IncludeReference $IncludeReference `
-        -ViewPolicy $ViewPolicy `
-        -MaxViews $MaxViews `
-        -MinViewScore $MinViewScore `
         -Postprocess $Postprocess `
         -BlenderPath $BlenderPath
 

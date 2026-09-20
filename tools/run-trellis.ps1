@@ -16,6 +16,7 @@ param(
     [long]$Seed = 1,
     [double]$Simplify = 0.95,
     [int]$TextureSize = 1024,
+    [switch]$GeometryOnly,
     [switch]$SavePly,
     [switch]$SelfTest,
     [switch]$CheckModels,
@@ -579,6 +580,10 @@ try {
     }
     foreach ($resolvedInput in $resolvedInputs) {
         $arguments += @("--input", $resolvedInput)
+    }
+    if ($GeometryOnly) {
+        $arguments += "--geometry-only"
+        Write-Host "[INFO] Mode géométrie seule : la texture sera produite par le pipeline multi-vues Blender."
     }
     if ($SavePly) {
         $arguments += "--save-ply"

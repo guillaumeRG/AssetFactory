@@ -380,17 +380,25 @@ function Invoke-AFVisualQA {
 function Invoke-AFAssetPipeline {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][ValidateSet("Prompt", "Image")][string]$InputKind,
+        [Parameter(Mandatory)][ValidateSet("Prompt", "Image")][string]$InputKind,
         [string]$Prompt = "",
-        [string]$InputPath = "",
         [string]$NegativePrompt = "",
+        [string]$InputPath = "",
         [string]$AssetId = "",
         [ValidateRange(0, [long]::MaxValue)][long]$Seed = 0,
         [ValidateRange(1, 64)][int]$Candidates = 1,
         [string]$Preset = "",
         [string[]]$Exclude = @(),
         [ValidateSet("trellis", "triposr")][string]$GeometryMethod = "trellis",
-        [string]$MultiviewMethod = "none",
+
+        [bool]$Multiview = $false,
+        [ValidateRange(1, 100)][int]$MultiviewCameras = 8,
+        [ValidateRange(256, 8192)][int]$TextureResolution = 2048,
+        [string]$TextureCheckpoint = "RealVisXL_V5.0_fp16.safetensors",
+        [string]$TexturePrompt = "",
+        [string]$TextureNegativePrompt = "",
+        [bool]$KeepProjectedBlend = $false,
+
         [ValidateRange(0.001, 1000000.0)][double]$TargetHeight = 1.0,
         [string]$ProjectProfile = "",
         [string]$Category = "",
@@ -402,30 +410,24 @@ function Invoke-AFAssetPipeline {
         [ValidateRange(10, 3600)][int]$TimeoutSeconds = 300,
         [bool]$ReleaseComfyMemory = $true,
         [string]$BlenderPath = "",
-        [string]$MultiviewProfile = "",
-        [string]$FusionMode = "",
-        [System.Nullable[bool]]$IncludeReference = $null,
-        [string]$ViewPolicy = "",
-        [System.Nullable[int]]$MaxViews = $null,
-        [System.Nullable[double]]$MinViewScore = $null,
         [ValidateSet("none", "qa")][string]$Postprocess = "none"
     )
 
-    if ($MultiviewMethod -ne "none" -and $GeometryMethod -ne "trellis") {
-        throw "Le multi-vues est actuellement compatible uniquement avec GeometryMethod=trellis."
+    if ($Multiview -and $GeometryMethod -ne "trellis") {
+        throw "Le mode multi-vues nécessite GeometryMethod=trellis."
+    }
+    if ($Multiview -and [string]::IsNullOrWhiteSpace($TexturePrompt)) {
+        throw "TexturePrompt est requis lorsque le mode multi-vues est activé."
     }
 
     $runner = Join-Path $script:ToolsRoot "run-image-to-3d.ps1"
     Assert-AFFile -Path $runner -Label "Pipeline image-vers-3D interne"
 
     $parameters = @{
-        AssetId = $AssetId
-        NegativePrompt = $NegativePrompt
-        Seed = $Seed
-        ReferenceCandidates = $Candidates
-        ReferencePreset = $Preset
-        ReferenceExclude = @($Exclude)
+        Mode = $(if ($Multiview) { "multiview" } else { "single" })
         Engine = $GeometryMethod
+        AssetId = $AssetId
+        Seed = $Seed
         TargetHeight = $TargetHeight
         ProjectProfile = $ProjectProfile
         Category = $Category
@@ -435,6 +437,12 @@ function Invoke-AFAssetPipeline {
         ReleaseComfyMemory = $ReleaseComfyMemory
         TrellisSimplify = $TrellisSimplify
         TrellisTextureSize = $TrellisTextureSize
+        MultiviewCameras = $MultiviewCameras
+        TextureResolution = $TextureResolution
+        TextureCheckpoint = $TextureCheckpoint
+        TexturePrompt = $TexturePrompt
+        TextureNegativePrompt = $TextureNegativePrompt
+        KeepProjectedBlend = $KeepProjectedBlend
         Postprocess = $Postprocess
     }
     if (-not [string]::IsNullOrWhiteSpace($BlenderPath)) { $parameters.BlenderPath = $BlenderPath }
@@ -442,33 +450,26 @@ function Invoke-AFAssetPipeline {
 
     if ($InputKind -eq "Prompt") {
         $parameters.Prompt = $Prompt
+        $parameters.NegativePrompt = $NegativePrompt
+        $parameters.ReferenceCandidates = $Candidates
+        $parameters.ReferencePreset = $Preset
+        $parameters.ReferenceExclude = @($Exclude)
     } else {
         $parameters.InputPath = $InputPath
     }
 
-    if ($MultiviewMethod -eq "none") {
-        $parameters.Mode = "single"
-    } else {
-        $parameters.Mode = "multiview"
-        $parameters.MultiviewMethod = $MultiviewMethod
-        if (-not [string]::IsNullOrWhiteSpace($MultiviewProfile)) { $parameters.MultiviewProfile = $MultiviewProfile }
-        if (-not [string]::IsNullOrWhiteSpace($FusionMode)) { $parameters.FusionMode = $FusionMode }
-        if ($null -ne $IncludeReference) { $parameters.IncludeReference = [bool]$IncludeReference }
-        if (-not [string]::IsNullOrWhiteSpace($ViewPolicy)) { $parameters.ViewPolicy = $ViewPolicy }
-        if ($null -ne $MaxViews) { $parameters.MaxViews = [int]$MaxViews }
-        if ($null -ne $MinViewScore) { $parameters.MinViewScore = [double]$MinViewScore }
-    }
+    $diagnosticsRoot = Join-Path $script:AssetFactoryRoot "outputs\diagnostics\pipeline"
+    New-Item -ItemType Directory -Path $diagnosticsRoot -Force | Out-Null
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $logPath = Join-Path $diagnosticsRoot ("asset-pipeline-{0}-{1}.log" -f $AssetId, $stamp)
 
-    $diagnosticRoot = Join-Path $script:AssetFactoryRoot "outputs\diagnostics\entrypoints"
-    New-Item -ItemType Directory -Path $diagnosticRoot -Force | Out-Null
-    $logPath = Join-Path $diagnosticRoot ("asset-{0}-{1}.log" -f $AssetId, (Get-Date -Format "yyyyMMdd-HHmmss-fff"))
     $result = Invoke-AFCommand -Executable $runner -Parameters $parameters -LogPath $logPath
     if ($result.ExitCode -ne 0) {
-        throw "La generation d'asset a echoue. Log : $logPath"
+        throw "Pipeline AssetFactory échoué avec le code $($result.ExitCode). Log : $($result.LogPath)"
     }
 
-    $json = Get-AFOutputValue -Lines $result.Output -Prefix "[RESULT_JSON] "
-    return ($json | ConvertFrom-Json)
+    $summaryJson = Get-AFOutputValue $result.Output "[RESULT_JSON] "
+    return ($summaryJson | ConvertFrom-Json)
 }
 
 Export-ModuleMember -Function Invoke-AFImageStage, Invoke-AFAssetPipeline, Invoke-AFVisualQA

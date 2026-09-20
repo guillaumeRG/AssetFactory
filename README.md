@@ -1,4 +1,4 @@
-﻿# Asset Factory V0.8
+# Asset Factory V0.9
 
 Asset Factory génère et prépare localement des assets 3D à partir d'un prompt texte ou d'une image.
 
@@ -7,19 +7,20 @@ Prompt
   -> image
   -> génération 3D
   -> normalisation Blender
+  -> texturing multi-vues optionnel
   -> import Unreal optionnel
 ```
-
+./app   
 Moteurs 3D pris en charge :
 
 - **TRELLIS**
 - **TripoSR**
 
-La génération multi-vues avec **Zero123++** est optionnelle.
+Le mode multi-vues est optionnel et s'active avec `-Multiview $true`.
 
 ---
 
-## Aperçu
+## Aperçu V0.8
 
 <table>
   <tr>
@@ -41,6 +42,16 @@ La génération multi-vues avec **Zero123++** est optionnelle.
     <td align="center">A rugged industrial portable work light, rectangular black metal housing, large circular glass lamp, yellow tubular protective frame, black top handle, side adjustment knob, realistic industrial construction, single isolated object</td>
     <td align="center"><img src="docs/images/TEST_Image_Single.png" width="260"></td>
     <td align="center"><img src="docs/images/worklight_3d_2.png" width="260"><img src="docs/images/worklight_3d.png" width="260"></td>
+  </tr>
+</table>
+
+## Aperçu V0.9 multiview texturing
+
+<table>
+  <tr>
+    <td align="center">old industrial metal barrel, worn painted steel, scratches, rust marks, realistic game asset</td>
+    <td align="center"><img src="docs/images/Barrel.png" width="260"></td>
+    <td align="center"><img src="docs/images/Barrel_3d.png" width="260"></td>
   </tr>
 </table>
 
@@ -71,8 +82,7 @@ Set-Location .\AssetFactory
 .\setup-asset-factory.ps1 trellis runtime-install
 .\setup-asset-factory.ps1 trellis model-install
 
-.\setup-asset-factory.ps1 multiview install -Method zero123plus-v1.1
-.\setup-asset-factory.ps1 multiview model-install -Method zero123plus-v1.1
+.\setup-asset-factory.ps1 multiview install
 ```
 
 Vérification :
@@ -80,6 +90,7 @@ Vérification :
 ```powershell
 .\setup-asset-factory.ps1 status
 .\setup-asset-factory.ps1 doctor
+.\setup-asset-factory.ps1 multiview doctor
 ```
 
 ---
@@ -137,19 +148,20 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
     -InputPath ".\reference.png" `
     -AssetId "StorageTank_01" `
     -GeometryMethod trellis `
-    -MultiviewMethod none `
     -TargetHeight 1.5 `
     -AutoImport $false
 ```
 
-### TRELLIS avec multi-vues
+### TRELLIS avec texturing multi-vues
 
 ```powershell
 .\tools\generate-asset-from-image.ps1 `
     -InputPath ".\reference.png" `
     -AssetId "StorageTank_MV_01" `
     -GeometryMethod trellis `
-    -MultiviewMethod zero123plus-v1.1 `
+    -Multiview $true `
+    -MultiviewCameras 16 `
+    -TexturePrompt "compact industrial storage tank, worn metal, realistic industrial asset" `
     -TargetHeight 1.5 `
     -AutoImport $false
 ```
@@ -161,7 +173,6 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
     -InputPath ".\reference.png" `
     -AssetId "StorageTank_TripoSR_01" `
     -GeometryMethod triposr `
-    -MultiviewMethod none `
     -TargetHeight 1.5 `
     -AutoImport $false
 ```
@@ -180,12 +191,11 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
     -Candidates 8 `
     -Seed 1234 `
     -GeometryMethod trellis `
-    -MultiviewMethod none `
     -TargetHeight 1.5 `
     -AutoImport $false
 ```
 
-### Best-of-N puis multi-vues puis TRELLIS
+### Best-of-N puis TRELLIS avec texturing multi-vues
 
 ```powershell
 .\tools\generate-asset-from-prompt.ps1 `
@@ -193,7 +203,8 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
     -AssetId "StorageTank_MV_02" `
     -Candidates 8 `
     -GeometryMethod trellis `
-    -MultiviewMethod zero123plus-v1.1 `
+    -Multiview $true `
+    -MultiviewCameras 16 `
     -TargetHeight 1.5 `
     -AutoImport $false
 ```
@@ -206,7 +217,6 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
     -AssetId "StorageTank_TripoSR_02" `
     -Candidates 4 `
     -GeometryMethod triposr `
-    -MultiviewMethod none `
     -TargetHeight 1.5 `
     -AutoImport $false
 ```
@@ -223,21 +233,13 @@ Sélection automatique de la meilleure image parmi plusieurs candidats :
 -Seed              seed de génération
 -InputPath         image source existante
 -GeometryMethod    trellis ou triposr
--MultiviewMethod   none ou zero123plus-v1.1
+-Multiview         active le texturing multi-vues
+-MultiviewCameras  nombre de caméras multi-vues
+-TexturePrompt     prompt de texturing (requis depuis une image)
 -TargetHeight      hauteur finale en mètres
 -ProjectProfile    profil Unreal optionnel
 -AutoImport        import Unreal automatique
 -Postprocess       none ou qa
-```
-
-Paramètres multi-vues utiles :
-
-```text
--FusionMode
--IncludeReference
--ViewPolicy
--MaxViews
--MinViewScore
 ```
 
 Contrôle qualité visuel optionnel :
@@ -261,7 +263,6 @@ Contrôle qualité visuel optionnel :
     -InputPath ".\reference.png" `
     -AssetId "Console_01" `
     -GeometryMethod trellis `
-    -MultiviewMethod none `
     -TargetHeight 1.2 `
     -ProjectProfile ".\profiles\mon-projet.json" `
     -AutoImport $true
@@ -288,18 +289,6 @@ Pipeline complet :
     -Mode full `
     -Engine trellis `
     -Candidates 8 `
-    -AutoImport $false
-```
-
-Avec multi-vues :
-
-```powershell
-.\tools\run-batch.ps1 `
-    -BatchPath ".\batches\mon-batch.json" `
-    -Mode full `
-    -Engine trellis `
-    -Candidates 8 `
-    -MultiviewMethod zero123plus-v1.1 `
     -AutoImport $false
 ```
 
