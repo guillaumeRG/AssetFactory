@@ -1,11 +1,11 @@
-﻿"""AssetFactory multiview projection/texturing driver.
+﻿import bmesh
+"""AssetFactory multiview projection/texturing driver.
 
 The adapter only orchestrates multiview. Camera placement, SDXL generation,
 depth rendering, sequential projection/blending and baking are executed by
 multiview's own Blender operators.
 """
 from __future__ import annotations
-import bmesh
 
 import argparse
 import json

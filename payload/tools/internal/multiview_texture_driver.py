@@ -1,11 +1,10 @@
-﻿"""AssetFactory multiview projection/texturing driver.
+"""AssetFactory multiview projection/texturing driver.
 
 The adapter only orchestrates multiview. Camera placement, SDXL generation,
 depth rendering, sequential projection/blending and baking are executed by
 multiview's own Blender operators.
 """
 from __future__ import annotations
-import bmesh
 
 import argparse
 import json
@@ -147,13 +146,13 @@ def load_source(path: Path) -> None:
         )
 
 
-def enable_stablegen() -> None:
-    addon_utils.enable("stablegen", default_set=False, persistent=False)
-    if "stablegen" not in bpy.context.preferences.addons:
+def enable_assettexturing() -> None:
+    addon_utils.enable("assettexturing", default_set=True, persistent=False)
+    if "assettexturing" not in bpy.context.preferences.addons:
         raise RuntimeError(
             "multiview addon preferences are unavailable after enabling the vendor addon."
         )
-    import stablegen  # noqa: F401
+    import assettexturing  # noqa: F401
     log("Vendored multiview enabled.")
 
 
@@ -170,7 +169,7 @@ def view3d_override() -> dict:
     )
 
 
-def apply_original_stablegen_modifiers() -> None:
+def apply_original_assettexturing_modifiers() -> None:
     """Run multiview's mesh-preparation operator before texturing.
 
     Blender refuses to apply modifiers when several objects share the same Mesh
@@ -255,13 +254,13 @@ def select_only(objects) -> None:
     bpy.context.view_layer.objects.active = objects[0]
 
 
-def configure_stablegen() -> None:
-    from stablegen.core import state
-    from stablegen.core.server_api import check_server_availability
+def configure_assettexturing() -> None:
+    from assettexturing.core import state
+    from assettexturing.core.server_api import check_server_availability
 
-    prefs = bpy.context.preferences.addons["stablegen"].preferences
+    prefs = bpy.context.preferences.addons["assettexturing"].preferences
     prefs.server_address = ARGS.server
-    prefs.output_dir = str(RUN_ROOT / "stablegen-output")
+    prefs.output_dir = str(RUN_ROOT / "assettexturing-output")
     Path(prefs.output_dir).mkdir(parents=True, exist_ok=True)
     prefs.save_blend_file = False
 
@@ -298,8 +297,8 @@ def configure_stablegen() -> None:
         item.supports_depth = name == required_cn
 
     scene = bpy.context.scene
-    scene.stablegen_preset = "DEFAULT"
-    result = bpy.ops.stablegen.apply_preset()
+    scene.assettexturing_preset = "DEFAULT"
+    result = bpy.ops.assettexturing.apply_preset()
     if "CANCELLED" in result:
         raise RuntimeError("multiview DEFAULT preset could not be applied.")
 
@@ -521,53 +520,12 @@ def _analyze_uv_islands(obj, uv_name: str) -> dict:
     }
 
 
-def _mesh_topology_report(obj) -> dict:
-    """Measure real mesh adjacency before UV unwrap without changing geometry."""
-    bm = bmesh.new()
-    try:
-        bm.from_mesh(obj.data)
-        face_count = len(bm.faces)
-        vertex_count = len(bm.verts)
-        edge_count = len(bm.edges)
-        shared_edges = sum(1 for edge in bm.edges if len(edge.link_faces) >= 2)
-        boundary_edges = sum(1 for edge in bm.edges if len(edge.link_faces) == 1)
-        return {
-            "vertex_count": vertex_count,
-            "face_count": face_count,
-            "edge_count": edge_count,
-            "shared_edge_count": shared_edges,
-            "boundary_edge_count": boundary_edges,
-        }
-    finally:
-        bm.free()
-
-
 def _rebuild_bake_uv(obj) -> dict:
     """Create a fresh bake-only UV atlas; never reuse TRELLIS/import UVs."""
     if bpy.context.mode != "OBJECT":
         bpy.ops.object.mode_set(mode="OBJECT")
 
     select_only([obj])
-    topology = _mesh_topology_report(obj)
-    log(
-        "Bake topology for "
-        f"{obj.name}: vertices={topology['vertex_count']} "
-        f"faces={topology['face_count']} edges={topology['edge_count']} "
-        f"shared_edges={topology['shared_edge_count']} "
-        f"boundary_edges={topology['boundary_edge_count']}"
-    )
-    if (
-        topology["face_count"] >= 100
-        and topology["shared_edge_count"] < topology["face_count"] * 0.25
-    ):
-        raise RuntimeError(
-            "Mesh adjacency is already disconnected before BakeUV unwrap on "
-            f"{obj.name} (faces={topology['face_count']}, "
-            f"shared_edges={topology['shared_edge_count']}). "
-            "The normalized geometry GLB must preserve indexed vertex topology "
-            "before texturing."
-        )
-
     existing = obj.data.uv_layers.get("BakeUV")
     if existing is not None:
         obj.data.uv_layers.remove(existing)
@@ -640,12 +598,12 @@ def bake_direct(targets) -> list[str]:
     already complete, so a synchronous final bake is deterministic and avoids
     a second modal operator competing with the launch UI context.
     """
-    from stablegen.texturing.rendering import (
+    from assettexturing.texturing.rendering import (
         BakeTextures,
         bake_texture,
         prepare_baking,
     )
-    from stablegen.utils import get_dir_path
+    from assettexturing.utils import get_dir_path
 
     context = bpy.context
     original_engine = context.scene.render.engine
@@ -691,7 +649,7 @@ def bake_direct(targets) -> list[str]:
 
 
 def finalize(targets, cameras, projected_blend, excluded, projection_risks) -> None:
-    from stablegen.utils import get_dir_path, get_file_path, get_generation_dirs
+    from assettexturing.utils import get_dir_path, get_file_path, get_generation_dirs
 
     baked_dir = Path(get_dir_path(bpy.context, "baked")).resolve()
     baked = []
@@ -793,7 +751,7 @@ def install_watcher(targets, cameras, excluded, projection_risks) -> None:
 
     def watch():
         try:
-            from stablegen.texturing.generator import ComfyUIGenerate
+            from assettexturing.texturing.generator import ComfyUIGenerate
 
             if not state["bake_started"]:
                 status = bpy.context.scene.generation_status
@@ -842,8 +800,8 @@ def main() -> None:
             raise RuntimeError(f"Source asset does not exist: {source}")
 
         load_source(source)
-        enable_stablegen()
-        apply_original_stablegen_modifiers()
+        enable_assettexturing()
+        apply_original_assettexturing_modifiers()
 
         if bpy.app.version < (4, 2, 0):
             raise RuntimeError(
@@ -876,10 +834,10 @@ def main() -> None:
                 "recorded in poc-result.json."
             )
 
-        working = RUN_ROOT / f"{ARGS.asset_name}_STABLEGEN_WORKING.blend"
+        working = RUN_ROOT / f"{ARGS.asset_name}_ASSETTEXTURING_WORKING.blend"
         bpy.ops.wm.save_as_mainfile(filepath=str(working))
 
-        configure_stablegen()
+        configure_assettexturing()
         cameras = create_cameras(targets)
         launch_texturing(targets)
         install_watcher(
@@ -893,5 +851,3 @@ def main() -> None:
 
 
 main()
-
-

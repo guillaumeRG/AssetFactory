@@ -70,6 +70,27 @@ def read_glb_json(path):
         return json.loads(handle.read(chunk_length).decode("utf-8").rstrip(" \x00"))
 
 
+
+
+def glb_attribute_accessor_counts(document, attribute_name):
+    """Return accessor counts for an attribute across every GLB primitive."""
+    counts = []
+    accessors = document.get("accessors", []) if document else []
+    for mesh in (document or {}).get("meshes", []):
+        for primitive in mesh.get("primitives", []):
+            accessor_index = (primitive.get("attributes") or {}).get(attribute_name)
+            if accessor_index is None:
+                continue
+            try:
+                counts.append(int(accessors[int(accessor_index)].get("count", 0)))
+            except (IndexError, KeyError, TypeError, ValueError):
+                continue
+    return counts
+
+
+def glb_has_attribute(document, attribute_name):
+    return bool(glb_attribute_accessor_counts(document, attribute_name))
+
 def validate_glb_output(path, source_document=None):
     document = read_glb_json(path)
     if not document.get("meshes"):
@@ -77,14 +98,35 @@ def validate_glb_output(path, source_document=None):
     for image in document.get("images", []):
         if "bufferView" not in image and not str(image.get("uri", "")).startswith("data:"):
             raise RuntimeError("Exported GLB refers to an external image instead of embedding it.")
+    source_position_count = 0
+    output_position_count = sum(glb_attribute_accessor_counts(document, "POSITION"))
     if source_document:
         for resource in ("materials", "textures", "images"):
             if source_document.get(resource) and not document.get(resource):
                 raise RuntimeError(f"GLB export lost all {resource}; refusing to report success.")
+
+        source_position_count = sum(glb_attribute_accessor_counts(source_document, "POSITION"))
+        source_has_normals = glb_has_attribute(source_document, "NORMAL")
+        source_has_texcoords = glb_has_attribute(source_document, "TEXCOORD_0")
+        if (
+            source_position_count > 0
+            and not source_has_normals
+            and not source_has_texcoords
+            and output_position_count > source_position_count * 2
+        ):
+            raise RuntimeError(
+                "Geometry-only GLB normalization exploded indexed topology: "
+                f"POSITION count {source_position_count} -> {output_position_count}. "
+                "Refusing to continue because downstream UV unwrapping would see "
+                "almost one disconnected triangle per face."
+            )
+
     return {
         "material_count": len(document.get("materials", [])),
         "texture_count": len(document.get("textures", [])),
         "image_count": len(document.get("images", [])),
+        "source_position_count": source_position_count,
+        "output_position_count": output_position_count,
     }
 
 
@@ -206,16 +248,25 @@ def main():
         obj.select_set(True)
     bpy.context.view_layer.objects.active = mesh_objects[0]
     if Path(output_path).suffix.lower() == ".glb":
+        # Preserve the source attribute contract. Geometry-only TRELLIS GLBs have
+        # POSITION + indices but no NORMAL/TEXCOORD attributes. Exporting generated
+        # flat normals here makes glTF duplicate vertices per triangle, turning an
+        # indexed mesh into a visually identical but topologically disconnected
+        # triangle soup. The multiview bake needs the original shared adjacency.
+        export_normals = bool(source_document and glb_has_attribute(source_document, "NORMAL"))
+        export_texcoords = bool(source_document and glb_has_attribute(source_document, "TEXCOORD_0"))
         bpy.ops.export_scene.gltf(
             filepath=output_path,
             export_format="GLB",
             use_selection=True,
-            export_texcoords=True,
-            export_normals=True,
+            export_texcoords=export_texcoords,
+            export_normals=export_normals,
             export_materials="EXPORT",
             export_animations=False,
             export_yup=True,
         )
+        result["glb_export_normals"] = export_normals
+        result["glb_export_texcoords"] = export_texcoords
         ensure_output(output_path)
         result.update(validate_glb_output(output_path, source_document))
         result["glb_output"] = output_path

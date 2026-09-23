@@ -147,7 +147,7 @@ $ComfyUiFluxModelPath = Join-Path $ComfyUiFluxModelsDir $ComfyUiFluxFileName
 # Le mode multi-vues réutilise ComfyUI et Blender déjà gérés par Asset Factory.
 # Aucun runtime de génération de vues 2D séparé n'est installé.
 $MultiViewDepsRoot = Join-Path $ProjectRoot "cache\multiview\blender-python"
-$MultiViewVendorRoot = Join-Path $ProjectRoot "vendor\AssetTexturing\assettexturing"
+$MultiViewVendorRoot = Join-Path $ProjectRoot "vendor\StableGen\stablegen"
 $MultiViewDriver = Join-Path $ProjectRoot "tools\internal\multiview_texture_driver.py"
 $MultiViewCheckpoint = Join-Path $ComfyUiRoot "models\checkpoints\RealVisXL_V5.0_fp16.safetensors"
 $MultiViewDepthModel = Join-Path $ComfyUiRoot "models\controlnet\controlnet_depth_sdxl.safetensors"
@@ -5408,3 +5408,4 @@ try {
     Write-Result "FAIL" $_.Exception.Message
     exit 1
 }
+

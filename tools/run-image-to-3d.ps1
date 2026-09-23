@@ -140,7 +140,7 @@ function Invoke-AFIntegratedMultiview {
         [Parameter(Mandatory)][string]$AssetName
     )
 
-    $vendorAddon = Join-Path $AssetFactoryRoot "vendor\AssetTexturing\assettexturing"
+    $vendorAddon = Join-Path $AssetFactoryRoot "vendor\StableGen\stablegen"
     $driver = Join-Path $PSScriptRoot "internal\multiview_texture_driver.py"
     $depsRoot = Join-Path $AssetFactoryRoot "cache\multiview\blender-python"
     $comfyRoot = Join-Path $AssetFactoryRoot "engines\comfyui"
@@ -166,8 +166,10 @@ function Invoke-AFIntegratedMultiview {
     $runtimeRoot = Join-Path $Layout.Root "runtime\multiview"
     $runtimeScripts = Join-Path $runtimeRoot "scripts"
     $runtimeAddonParent = Join-Path $runtimeScripts "addons"
-    $runtimeAddon = Join-Path $runtimeAddonParent "assettexturing"
+    $runtimeAddon = Join-Path $runtimeAddonParent "stablegen"
+    $legacyRuntimeAddon = Join-Path $runtimeAddonParent "assettexturing"
     New-Item -ItemType Directory -Path $runtimeAddonParent -Force | Out-Null
+    if (Test-Path -LiteralPath $legacyRuntimeAddon) { Remove-Item -LiteralPath $legacyRuntimeAddon -Recurse -Force }
     if (Test-Path -LiteralPath $runtimeAddon) { Remove-Item -LiteralPath $runtimeAddon -Recurse -Force }
     Copy-Item -LiteralPath $vendorAddon -Destination $runtimeAddon -Recurse -Force
 
@@ -231,6 +233,7 @@ function Invoke-AFIntegratedMultiview {
         Write-AFInfo "Multi-vues Blender : $MultiviewCameras caméra(s), projection séquentielle puis bake final."
 
         $arguments = @(
+            "--factory-startup",
             "--online-mode",
             "--python-use-system-env",
             "--python-exit-code", "1",
@@ -826,3 +829,5 @@ if ($null -ne $GenerationMetadata) {
     Write-Output ("[RESULT_JSON] " + ($result | ConvertTo-Json -Compress))
 }
 exit $ExitCode
+
+
