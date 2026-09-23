@@ -8,6 +8,7 @@ from __future__ import annotations
 import bmesh
 
 import argparse
+import importlib
 import json
 import math
 import re
@@ -147,14 +148,95 @@ def load_source(path: Path) -> None:
         )
 
 
+_STABLEGEN_PACKAGE: str | None = None
+
+
+def import_stablegen(relative_module: str = ""):
+    """Import a module from the StableGen package that Blender actually enabled.
+
+    StableGen supports both classic add-on names (``stablegen``) and Blender
+    extension namespaces (for example ``bl_ext.user_default.stablegen``).  Keep
+    AssetFactory independent from that packaging detail.
+    """
+    if not _STABLEGEN_PACKAGE:
+        raise RuntimeError("StableGen has not been enabled yet.")
+    module_name = (
+        _STABLEGEN_PACKAGE
+        if not relative_module
+        else f"{_STABLEGEN_PACKAGE}.{relative_module}"
+    )
+    return importlib.import_module(module_name)
+
+
+def get_stablegen_preferences():
+    """Return StableGen preferences without hard-coding Blender's add-on key."""
+    core = import_stablegen("core")
+
+    # StableGen >= 0.3 exposes this specifically to handle both classic add-on
+    # and Blender Extension package names. Prefer the vendor API when present.
+    getter = getattr(core, "get_addon_prefs", None)
+    if callable(getter):
+        prefs = getter()
+        if prefs is not None:
+            return prefs
+
+    addon_pkg = str(getattr(core, "ADDON_PKG", _STABLEGEN_PACKAGE))
+    wrapper = bpy.context.preferences.addons.get(addon_pkg)
+    if wrapper is not None and getattr(wrapper, "preferences", None) is not None:
+        return wrapper.preferences
+
+    registered = sorted(
+        str(getattr(addon, "module", ""))
+        for addon in bpy.context.preferences.addons
+        if getattr(addon, "module", "")
+    )
+    raise RuntimeError(
+        "StableGen preferences are unavailable after enabling the vendor addon "
+        f"(package={addon_pkg!r}, registered_addons={registered!r})."
+    )
+
+
 def enable_stablegen() -> None:
-    addon_utils.enable("stablegen", default_set=False, persistent=False)
-    if "stablegen" not in bpy.context.preferences.addons:
+    """Enable the vendored StableGen add-on and verify its preferences exist.
+
+    ``default_set=True`` is intentional. Blender only creates an entry in
+    ``bpy.context.preferences.addons`` when the add-on is enabled as a user
+    preference. StableGen's AddonPreferences and several of its operators rely
+    on that entry. The launcher uses isolated BLENDER_USER_SCRIPTS and BLENDER_USER_CONFIG
+    directories, so this does not install or persist StableGen globally for the user.
+    """
+    global _STABLEGEN_PACKAGE
+
+    enable_errors: list[BaseException] = []
+
+    def _capture_enable_error(exc: BaseException) -> None:
+        enable_errors.append(exc)
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+    module = addon_utils.enable(
+        "stablegen",
+        default_set=True,
+        persistent=False,
+        handle_error=_capture_enable_error,
+    )
+    if module is None:
+        if enable_errors:
+            cause = enable_errors[-1]
+            raise RuntimeError(
+                "Blender could not enable the vendored StableGen add-on: "
+                f"{cause!r}"
+            ) from cause
         raise RuntimeError(
-            "multiview addon preferences are unavailable after enabling the vendor addon."
+            "Blender could not enable the vendored StableGen add-on; "
+            "addon_utils.enable() returned None without an exception."
         )
-    import stablegen  # noqa: F401
-    log("Vendored multiview enabled.")
+
+    _STABLEGEN_PACKAGE = str(module.__name__)
+    get_stablegen_preferences()
+    log(
+        "Vendored StableGen enabled with preferences "
+        f"(package={_STABLEGEN_PACKAGE})."
+    )
 
 
 def view3d_override() -> dict:
@@ -256,10 +338,11 @@ def select_only(objects) -> None:
 
 
 def configure_stablegen() -> None:
-    from stablegen.core import state
-    from stablegen.core.server_api import check_server_availability
+    state = import_stablegen("core.state")
+    server_api = import_stablegen("core.server_api")
+    check_server_availability = server_api.check_server_availability
 
-    prefs = bpy.context.preferences.addons["stablegen"].preferences
+    prefs = get_stablegen_preferences()
     prefs.server_address = ARGS.server
     prefs.output_dir = str(RUN_ROOT / "stablegen-output")
     Path(prefs.output_dir).mkdir(parents=True, exist_ok=True)
@@ -640,12 +723,12 @@ def bake_direct(targets) -> list[str]:
     already complete, so a synchronous final bake is deterministic and avoids
     a second modal operator competing with the launch UI context.
     """
-    from stablegen.texturing.rendering import (
-        BakeTextures,
-        bake_texture,
-        prepare_baking,
-    )
-    from stablegen.utils import get_dir_path
+    rendering = import_stablegen("texturing.rendering")
+    utils = import_stablegen("utils")
+    BakeTextures = rendering.BakeTextures
+    bake_texture = rendering.bake_texture
+    prepare_baking = rendering.prepare_baking
+    get_dir_path = utils.get_dir_path
 
     context = bpy.context
     original_engine = context.scene.render.engine
@@ -691,7 +774,10 @@ def bake_direct(targets) -> list[str]:
 
 
 def finalize(targets, cameras, projected_blend, excluded, projection_risks) -> None:
-    from stablegen.utils import get_dir_path, get_file_path, get_generation_dirs
+    utils = import_stablegen("utils")
+    get_dir_path = utils.get_dir_path
+    get_file_path = utils.get_file_path
+    get_generation_dirs = utils.get_generation_dirs
 
     baked_dir = Path(get_dir_path(bpy.context, "baked")).resolve()
     baked = []
@@ -793,7 +879,9 @@ def install_watcher(targets, cameras, excluded, projection_risks) -> None:
 
     def watch():
         try:
-            from stablegen.texturing.generator import ComfyUIGenerate
+            ComfyUIGenerate = import_stablegen(
+                "texturing.generator"
+            ).ComfyUIGenerate
 
             if not state["bake_started"]:
                 status = bpy.context.scene.generation_status

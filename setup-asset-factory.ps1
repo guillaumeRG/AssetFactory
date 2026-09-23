@@ -149,6 +149,7 @@ $ComfyUiFluxModelPath = Join-Path $ComfyUiFluxModelsDir $ComfyUiFluxFileName
 $MultiViewDepsRoot = Join-Path $ProjectRoot "cache\multiview\blender-python"
 $MultiViewVendorRoot = Join-Path $ProjectRoot "vendor\StableGen\stablegen"
 $MultiViewDriver = Join-Path $ProjectRoot "tools\internal\multiview_texture_driver.py"
+$MultiViewAddonSmoke = Join-Path $ProjectRoot "tools\internal\multiview_addon_smoke.py"
 $MultiViewCheckpoint = Join-Path $ComfyUiRoot "models\checkpoints\RealVisXL_V5.0_fp16.safetensors"
 $MultiViewDepthModel = Join-Path $ComfyUiRoot "models\controlnet\controlnet_depth_sdxl.safetensors"
 $MultiViewLightningLora = Join-Path $ComfyUiRoot "models\loras\sdxl_lightning_8step_lora.safetensors"
@@ -4904,6 +4905,70 @@ function Ensure-MultiViewBlenderDependencies {
     Write-Result "OK" "Dépendances Blender multi-vues validées"
 }
 
+function Test-MultiViewBlenderAddon {
+    $blender = Get-BlenderInfo
+    if (-not $blender.Installed) {
+        throw "Blender est requis pour valider l'addon multi-vues."
+    }
+    if (-not (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container)) {
+        throw "Module Blender multi-vues absent : $MultiViewVendorRoot"
+    }
+    if (-not (Test-Path -LiteralPath $MultiViewAddonSmoke -PathType Leaf)) {
+        throw "Smoke test Blender multi-vues absent : $MultiViewAddonSmoke"
+    }
+    if (-not (Test-Path -LiteralPath $MultiViewDepsRoot -PathType Container)) {
+        throw "Dépendances Blender multi-vues absentes : $MultiViewDepsRoot"
+    }
+
+    # Reproduce the same isolated add-on layout used by the real pipeline. This
+    # catches registration/preferences regressions before a full generation run.
+    $runtimeRoot = Join-Path $ProjectRoot "cache\multiview\doctor-runtime"
+    $runtimeScripts = Join-Path $runtimeRoot "scripts"
+    $runtimeConfig = Join-Path $runtimeRoot "config"
+    $runtimeAddonParent = Join-Path $runtimeScripts "addons"
+    $runtimeAddon = Join-Path $runtimeAddonParent "stablegen"
+
+    if (Test-Path -LiteralPath $runtimeRoot) {
+        Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $runtimeAddonParent -Force | Out-Null
+    Copy-Item -LiteralPath $MultiViewVendorRoot -Destination $runtimeAddon -Recurse -Force
+
+    $blenderExecutable = $blender.Path
+    $oldUserScripts = $env:BLENDER_USER_SCRIPTS
+    $oldUserConfig = $env:BLENDER_USER_CONFIG
+    $oldPythonPath = $env:PYTHONPATH
+    try {
+        New-Item -ItemType Directory -Path $runtimeConfig -Force | Out-Null
+        $env:BLENDER_USER_SCRIPTS = $runtimeScripts
+        $env:BLENDER_USER_CONFIG = $runtimeConfig
+        $env:PYTHONPATH = if ($oldPythonPath) {
+            "$MultiViewDepsRoot$([IO.Path]::PathSeparator)$oldPythonPath"
+        } else {
+            $MultiViewDepsRoot
+        }
+
+        & $blenderExecutable `
+            --factory-startup `
+            --background `
+            --online-mode `
+            --python-use-system-env `
+            --python-exit-code 1 `
+            --python $MultiViewAddonSmoke | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "Blender n'arrive pas à activer StableGen ou à accéder à ses préférences (code $LASTEXITCODE)."
+        }
+    }
+    finally {
+        $env:BLENDER_USER_SCRIPTS = $oldUserScripts
+        $env:BLENDER_USER_CONFIG = $oldUserConfig
+        $env:PYTHONPATH = $oldPythonPath
+        Remove-Item -LiteralPath $runtimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Result "OK" "Activation Blender/StableGen et préférences validées"
+}
+
 function Ensure-MultiViewModels {
     Ensure-MultiViewFile `
         -Uri "https://huggingface.co/ByteDance/SDXL-Lightning/resolve/main/sdxl_lightning_8step_lora.safetensors?download=true" `
@@ -4984,11 +5049,22 @@ function Invoke-MultiViewDoctor {
         Write-Result "FAIL" ("Modèles manquants : " + ($missing -join ", ")); $failures++
     } else { Write-Result "OK" "Modèles multi-vues prêts" }
 
+    $depsReady = $true
     try {
         Ensure-MultiViewBlenderDependencies -CheckOnly
     } catch {
         Write-Result "FAIL" $_.Exception.Message
         $failures++
+        $depsReady = $false
+    }
+
+    if ($depsReady -and (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container)) {
+        try {
+            Test-MultiViewBlenderAddon
+        } catch {
+            Write-Result "FAIL" $_.Exception.Message
+            $failures++
+        }
     }
 
     if ($failures -gt 0) { return 1 }

@@ -165,6 +165,7 @@ function Invoke-AFIntegratedMultiview {
 
     $runtimeRoot = Join-Path $Layout.Root "runtime\multiview"
     $runtimeScripts = Join-Path $runtimeRoot "scripts"
+    $runtimeConfig = Join-Path $runtimeRoot "config"
     $runtimeAddonParent = Join-Path $runtimeScripts "addons"
     $runtimeAddon = Join-Path $runtimeAddonParent "stablegen"
     $legacyRuntimeAddon = Join-Path $runtimeAddonParent "assettexturing"
@@ -200,6 +201,7 @@ function Invoke-AFIntegratedMultiview {
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding UTF8
 
     $oldUserScripts = $env:BLENDER_USER_SCRIPTS
+    $oldUserConfig = $env:BLENDER_USER_CONFIG
     $oldPythonPath = $env:PYTHONPATH
     try {
         if (-not (Test-AFComfyServer -BaseUrl $baseUrl)) {
@@ -221,7 +223,9 @@ function Invoke-AFIntegratedMultiview {
             Write-AFInfo "Réutilisation de ComfyUI : $baseUrl"
         }
 
+        New-Item -ItemType Directory -Path $runtimeConfig -Force | Out-Null
         $env:BLENDER_USER_SCRIPTS = $runtimeScripts
+        $env:BLENDER_USER_CONFIG = $runtimeConfig
         $env:PYTHONPATH = if ($oldPythonPath) {
             "$depsRoot$([IO.Path]::PathSeparator)$oldPythonPath"
         } else {
@@ -253,7 +257,11 @@ function Invoke-AFIntegratedMultiview {
         }
         $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
         if ($result.status -ne "success") {
-            throw "Le texturage multi-vues a échoué : $($result.error)"
+            $failure = [string]$result.error
+            if (-not [string]::IsNullOrWhiteSpace([string]$result.exception)) {
+                $failure += " | exception: $($result.exception)"
+            }
+            throw "Le texturage multi-vues a échoué : $failure. Détails : $resultPath. Logs : $blenderOut / $blenderErr"
         }
         if ($process.ExitCode -ne 0) {
             throw "Blender a terminé avec le code $($process.ExitCode)."
@@ -262,6 +270,7 @@ function Invoke-AFIntegratedMultiview {
     }
     finally {
         $env:BLENDER_USER_SCRIPTS = $oldUserScripts
+        $env:BLENDER_USER_CONFIG = $oldUserConfig
         $env:PYTHONPATH = $oldPythonPath
         if ($startedComfy -and $ReleaseComfyMemory -and $null -ne $comfyProcess -and -not $comfyProcess.HasExited) {
             Stop-Process -Id $comfyProcess.Id -Force -ErrorAction SilentlyContinue
