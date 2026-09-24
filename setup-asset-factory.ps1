@@ -11,13 +11,14 @@ param(
 
     [string]$Method = "projection",
 
+    [switch]$CoreOnly,
     [switch]$NoInstall
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "0.7.1"
+$ScriptVersion = "0.9.1"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $MinimumPowerShellVersion = [version]"5.1"
 $Script:HadWarnings = $false
@@ -147,7 +148,10 @@ $ComfyUiFluxModelPath = Join-Path $ComfyUiFluxModelsDir $ComfyUiFluxFileName
 # Le mode multi-vues réutilise ComfyUI et Blender déjà gérés par Asset Factory.
 # Aucun runtime de génération de vues 2D séparé n'est installé.
 $MultiViewDepsRoot = Join-Path $ProjectRoot "cache\multiview\blender-python"
-$MultiViewVendorRoot = Join-Path $ProjectRoot "vendor\StableGen\stablegen"
+$MultiViewRepoUrl = "https://github.com/sakalond/StableGen.git"
+$MultiViewPinnedCommit = "fae5474098c40ce149a93dbfffe02b33876b3cd4"
+$MultiViewRepoRoot = Join-Path $ProjectRoot "vendor\StableGen"
+$MultiViewVendorRoot = Join-Path $MultiViewRepoRoot "stablegen"
 $MultiViewDriver = Join-Path $ProjectRoot "tools\internal\multiview_texture_driver.py"
 $MultiViewAddonSmoke = Join-Path $ProjectRoot "tools\internal\multiview_addon_smoke.py"
 $MultiViewCheckpoint = Join-Path $ComfyUiRoot "models\checkpoints\RealVisXL_V5.0_fp16.safetensors"
@@ -546,17 +550,19 @@ function Get-NvidiaInfo {
 function Install-WingetPackage {
     param(
         [Parameter(Mandatory)][string]$Id,
-        [Parameter(Mandatory)][string]$DisplayName
+        [Parameter(Mandatory)][string]$DisplayName,
+        [string]$Version = "",
+        [string]$Override = "",
+        [switch]$Force
     )
 
     $winget = Get-ExecutablePath @("winget.exe", "winget")
     if (-not $winget) {
-        throw "winget is not available. Install App Installer or install $DisplayName manually."
+        throw "winget is not available. Install Microsoft App Installer, then rerun Asset Factory setup."
     }
 
     Write-Result "INFO" "Installing $DisplayName via winget..."
-
-    $result = Invoke-NativeCapture -Executable $winget -Arguments @(
+    $arguments = @(
         "install",
         "--id", $Id,
         "--exact",
@@ -566,14 +572,44 @@ function Install-WingetPackage {
         "--silent",
         "--disable-interactivity"
     )
+    if (-not [string]::IsNullOrWhiteSpace($Version)) { $arguments += @("--version", $Version) }
+    if (-not [string]::IsNullOrWhiteSpace($Override)) { $arguments += @("--override", $Override) }
+    if ($Force) { $arguments += "--force" }
+
+    $result = Invoke-NativeCapture -Executable $winget -Arguments $arguments
 
     if ($result.ExitCode -ne 0) {
-        $details = ($result.Output | Select-Object -Last 8) -join [Environment]::NewLine
+        $details = ($result.Output | Select-Object -Last 12) -join [Environment]::NewLine
         throw "winget failed while installing $DisplayName (exit code $($result.ExitCode)).`n$details"
     }
 
     Refresh-ProcessPath
     Write-Result "OK" "$DisplayName installation completed"
+}
+
+function Get-WingetMatchingVersion {
+    param(
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][string]$VersionPrefix
+    )
+
+    $winget = Get-ExecutablePath @("winget.exe", "winget")
+    if (-not $winget) { return $null }
+    $probe = Invoke-NativeCapture -Executable $winget -Arguments @(
+        "show", "--id", $Id, "--exact", "--versions", "--source", "winget",
+        "--accept-source-agreements", "--disable-interactivity"
+    )
+    if ($probe.ExitCode -ne 0) { return $null }
+
+    $versions = @()
+    foreach ($line in $probe.Output) {
+        $value = $line.ToString().Trim()
+        if ($value -match ('^' + [regex]::Escape($VersionPrefix) + '(?:\.\d+)*$')) {
+            try { $versions += [version]$value } catch {}
+        }
+    }
+    if ($versions.Count -eq 0) { return $null }
+    return ($versions | Sort-Object -Descending | Select-Object -First 1).ToString()
 }
 
 function Assert-DetectedAfterInstall {
@@ -902,6 +938,95 @@ function Get-Vs2022CppToolchainInfo {
     }
 }
 
+function Ensure-Vs2022CppBuildTools {
+    $vs = Get-Vs2022CppToolchainInfo
+    if ($vs.Installed) {
+        Write-Result "OK" "Reusing VS2022 C++ Build Tools / MSVC $($vs.Toolset)"
+        return $vs
+    }
+    if ($NoInstall) {
+        throw "Visual Studio 2022 C++ Build Tools are missing and -NoInstall is active."
+    }
+
+    # The workload is passed explicitly because the bare Build Tools package does not
+    # guarantee that cl.exe/MSVC is installed. Re-running this command is safe: the VS
+    # installer converges the existing instance to the requested workload.
+    Install-WingetPackage `
+        -Id "Microsoft.VisualStudio.2022.BuildTools" `
+        -DisplayName "Visual Studio 2022 C++ Build Tools" `
+        -Override "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" `
+        -Force
+
+    $vs = Get-Vs2022CppToolchainInfo
+    if (-not $vs.Installed) {
+        throw "VS2022 Build Tools installation finished, but cl.exe is still not detectable. A reboot may be required; rerun setup afterwards."
+    }
+    Write-Result "OK" "VS2022 C++ Build Tools ready / MSVC $($vs.Toolset)"
+    return $vs
+}
+
+function Repair-Cuda134VsIntegration {
+    $info = Get-TrellisNativeToolchainInfo
+    if ($info.IntegrationValid) { return }
+    if (-not $info.CudaPresent -or -not $info.VsInstalled) { return }
+
+    $source = Join-Path $info.CudaRoot "extras\visual_studio_integration\MSBuildExtensions"
+    $destination = Join-Path $info.VsRoot "MSBuild\Microsoft\VC\v170\BuildCustomizations"
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) { return }
+    if ($NoInstall) { return }
+
+    $files = @(Get-ChildItem -LiteralPath $source -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -like "CUDA 13.4.*" -or $_.Name -eq "Nvda.Build.CudaTasks.v13.4.dll"
+    })
+    if ($files.Count -eq 0) { return }
+    try {
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        foreach ($file in $files) {
+            $target = Join-Path $destination $file.Name
+            if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or (Get-Item -LiteralPath $target).Length -ne $file.Length) {
+                Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+            }
+        }
+        Write-Result "OK" "CUDA 13.4 Visual Studio integration repaired"
+    } catch {
+        throw "CUDA 13.4 is installed but its VS2022 integration is missing, and setup could not repair it. Rerun this setup from an elevated PowerShell. $($_.Exception.Message)"
+    }
+}
+
+function Ensure-Cuda134Toolkit {
+    $info = Get-TrellisNativeToolchainInfo
+    if ($info.CudaPresent -and $info.NvccVersion -eq "13.4") {
+        Write-Result "OK" "Reusing CUDA Toolkit 13.4 - $($info.NvccPath)"
+        Repair-Cuda134VsIntegration
+        return (Get-TrellisNativeToolchainInfo)
+    }
+    if ($NoInstall) {
+        throw "CUDA Toolkit 13.4 is missing and -NoInstall is active."
+    }
+
+    $version = Get-WingetMatchingVersion -Id "Nvidia.CUDA" -VersionPrefix "13.4"
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "winget does not currently expose a CUDA 13.4 package (Nvidia.CUDA). Install CUDA Toolkit 13.4 manually, then rerun setup."
+    }
+    Install-WingetPackage -Id "Nvidia.CUDA" -DisplayName "NVIDIA CUDA Toolkit 13.4" -Version $version
+    Refresh-ProcessPath
+    $info = Get-TrellisNativeToolchainInfo
+    if (-not $info.CudaPresent -or $info.NvccVersion -ne "13.4") {
+        throw "CUDA Toolkit installation completed, but nvcc 13.4 is not detectable at '$($info.NvccPath)'. A reboot may be required; rerun setup afterwards."
+    }
+    Repair-Cuda134VsIntegration
+    return (Get-TrellisNativeToolchainInfo)
+}
+
+function Assert-NvidiaDriverReady {
+    $gpu = Get-NvidiaInfo
+    if (-not $gpu.Available) {
+        throw "No usable NVIDIA driver was detected with nvidia-smi. Install the current NVIDIA driver for this GPU, reboot if requested, then rerun setup. CUDA 13.4 no longer supplies the Windows display driver."
+    }
+    Write-Result "OK" "NVIDIA driver ready: $($gpu.Name), driver $($gpu.DriverVersion)"
+    return $gpu
+}
+
 function Test-TripoSrCudaVsIntegration {
     param([Parameter(Mandatory)]$CudaToolkit)
 
@@ -1163,9 +1288,15 @@ function Invoke-TripoSrPython {
 }
 
 function Ensure-TripoSrPackagingTools {
-    $result = Invoke-TripoSrPython -Arguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+    $probe = Invoke-TripoSrPython -Arguments @("-c", "import pip, setuptools, wheel; print('OK')")
+    if ($probe.ExitCode -eq 0) {
+        Write-Result "OK" "Reusing TripoSR pip/setuptools/wheel"
+        return
+    }
+    if ($NoInstall) { throw "TripoSR packaging tools are incomplete and -NoInstall is active." }
+    $result = Invoke-TripoSrPython -Arguments @("-m", "pip", "install", "pip", "setuptools", "wheel")
     if ($result.ExitCode -ne 0) {
-        throw "Could not upgrade TripoSR packaging tools: $($result.Output -join ' | ')"
+        throw "Could not prepare TripoSR packaging tools: $($result.Output -join ' | ')"
     }
     Write-Result "OK" "TripoSR pip/setuptools/wheel ready"
 }
@@ -1268,6 +1399,14 @@ function Ensure-TripoSrRequirements {
     if (-not (Test-Path -LiteralPath $TripoSrRequirements)) {
         throw "TripoSR requirements.txt is missing."
     }
+
+    $tsrProbe = Invoke-TripoSrPython -Arguments @("-c", "import tsr; from tsr.system import TSR; print('OK')")
+    $mcubesProbe = Invoke-TripoSrPython -Arguments @("-m", "pip", "show", "torchmcubes")
+    if ($tsrProbe.ExitCode -eq 0 -and $mcubesProbe.ExitCode -eq 0) {
+        Write-Result "OK" "Reusing existing TripoSR requirements"
+        return
+    }
+    if ($NoInstall) { throw "TripoSR requirements are incomplete and -NoInstall is active." }
 
     Ensure-TripoSrBuildDependencies
 
@@ -1854,8 +1993,17 @@ function Ensure-TrellisPackagingTools {
         [Parameter(Mandatory)][string]$Label
     )
 
+    $probe = Invoke-TrellisPython -PythonPath $PythonPath -Arguments @(
+        "-c", "import pip, setuptools, wheel; print(setuptools.__version__)"
+    )
+    if ($probe.ExitCode -eq 0 -and $probe.StdOut.Count -gt 0 -and $probe.StdOut[-1].ToString().Trim() -eq "80.10.2") {
+        Write-Result "OK" "Reusing $Label pip/wheel/setuptools 80.10.2"
+        return
+    }
+    if ($NoInstall) { throw "$Label packaging tools are incomplete and -NoInstall is active." }
+
     $result = Invoke-TrellisPython -PythonPath $PythonPath -Arguments @(
-        "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools==80.10.2"
+        "-m", "pip", "install", "pip", "wheel", "setuptools==80.10.2"
     )
     if ($result.ExitCode -ne 0) {
         throw "Could not prepare $Label packaging tools: $($result.Output -join ' | ')"
@@ -1948,13 +2096,16 @@ function Ensure-TrellisRuntimePyTorch {
 }
 
 function Ensure-TrellisRuntimeBasicPackages {
-    if ($NoInstall) {
-        Write-Result "INFO" "-NoInstall: skipping TRELLIS runtime package installation."
+    try {
+        Test-TrellisRuntimeBasicImports
+        Write-Result "OK" "Reusing existing TRELLIS basic runtime dependencies"
         return
+    } catch {
+        if ($NoInstall) { throw "TRELLIS basic runtime dependencies are incomplete and -NoInstall is active. $($_.Exception.Message)" }
     }
 
-    Write-Result "INFO" "Installing TRELLIS pure-Python/basic runtime dependencies..."
-    $arguments = @("-m", "pip", "install", "--upgrade") + $TrellisBasicPackages
+    Write-Result "INFO" "Installing missing TRELLIS pure-Python/basic runtime dependencies..."
+    $arguments = @("-m", "pip", "install") + $TrellisBasicPackages
     $install = Invoke-TrellisPython -PythonPath $TrellisRuntimeVenvPython -Arguments $arguments
     if ($install.ExitCode -ne 0) {
         throw "TRELLIS basic dependency installation failed: $($install.Output -join ' | ')"
@@ -2178,15 +2329,18 @@ function Get-TrellisNativeToolchainInfo {
 
     $props = $null
     $targets = $null
+    $tasks = $null
     $integrationValid = $false
 
     if ($vs.Installed) {
         $buildCustomizations = Join-Path $vs.Root "MSBuild\Microsoft\VC\v170\BuildCustomizations"
         $props = Join-Path $buildCustomizations "CUDA 13.4.props"
         $targets = Join-Path $buildCustomizations "CUDA 13.4.targets"
+        $tasks = Join-Path $buildCustomizations "Nvda.Build.CudaTasks.v13.4.dll"
         $integrationValid = (
             (Test-Path -LiteralPath $props -PathType Leaf) -and
-            (Test-Path -LiteralPath $targets -PathType Leaf)
+            (Test-Path -LiteralPath $targets -PathType Leaf) -and
+            (Test-Path -LiteralPath $tasks -PathType Leaf)
         )
     }
 
@@ -2201,6 +2355,7 @@ function Get-TrellisNativeToolchainInfo {
         ClPath = $vs.ClPath
         PropsPath = $props
         TargetsPath = $targets
+        TasksPath = $tasks
         IntegrationValid = $integrationValid
     }
 }
@@ -3654,7 +3809,7 @@ function Invoke-TrellisRuntimeInstall {
     Remove-TrellisBrokenXFormers
 
     Write-Result "OK" "TRELLIS AF-08B runtime foundation validated"
-    Write-Result "INFO" "PyTorch CUDA 13 is isolated inside .venv-runtime; system CUDA Toolkit 12.8 was not modified."
+    Write-Result "INFO" "PyTorch CUDA 13 is isolated inside .venv-runtime; this runtime step does not modify the system CUDA Toolkit."
     Write-Result "INFO" "No third-party installer or paid package was used."
     Write-Result "INFO" "Native TRELLIS CUDA extensions are intentionally deferred to AF-08C."
 }
@@ -4073,11 +4228,14 @@ function Invoke-ComfyUiPython {
 }
 
 function Ensure-ComfyUiPackagingTools {
-    $result = Invoke-ComfyUiPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
-    if ($result.ExitCode -ne 0) {
-        throw "Could not upgrade ComfyUI pip: $($result.Output -join ' | ')"
+    $probe = Invoke-ComfyUiPython -Arguments @("-m", "pip", "--version")
+    if ($probe.ExitCode -eq 0) {
+        Write-Result "OK" "Reusing ComfyUI pip"
+        return
     }
-
+    if ($NoInstall) { throw "ComfyUI pip is unavailable and -NoInstall is active." }
+    $ensure = Invoke-ComfyUiPython -Arguments @("-m", "ensurepip", "--upgrade")
+    if ($ensure.ExitCode -ne 0) { throw "Could not prepare ComfyUI pip: $($ensure.Output -join ' | ')" }
     Write-Result "OK" "ComfyUI pip ready"
 }
 
@@ -4282,16 +4440,16 @@ function Ensure-ComfyUiRequirements {
         throw "ComfyUI requirements.txt is missing."
     }
 
-    if ($NoInstall) {
-        $probe = Test-ComfyUiDependencies
-        if (-not $probe.Valid) {
-            throw "ComfyUI Python dependencies are incomplete. -NoInstall prevents installation. Details: $($probe.Message)"
-        }
-        Write-Result "OK" "ComfyUI Python dependencies already valid"
+    $probe = Test-ComfyUiDependencies
+    if ($probe.Valid) {
+        Write-Result "OK" "Reusing existing ComfyUI Python dependencies"
         return
     }
+    if ($NoInstall) {
+        throw "ComfyUI Python dependencies are incomplete. -NoInstall prevents installation. Details: $($probe.Message)"
+    }
 
-    # pip est idempotent ici : les dépendances déjà satisfaites sont réutilisées. PyTorch
+    # Les dépendances déjà satisfaites sont réutilisées. PyTorch
     # a d'abord été installé depuis l'index CUDA 13.0 ; les entrées torch non épinglées
     # de requirements.txt restent donc satisfaites au lieu de remplacer le build CUDA.
     $result = Invoke-ComfyUiPython -Arguments @("-m", "pip", "install", "-r", $ComfyUiRequirements)
@@ -4805,6 +4963,92 @@ function Invoke-ComfyUiCommand {
 }
 
 
+function Test-MultiViewRepository {
+    if (-not (Test-Path -LiteralPath $MultiViewRepoRoot -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "missing"; Origin = $null; Message = "vendor\\StableGen does not exist" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $MultiViewRepoRoot ".git") -PathType Container)) {
+        return [pscustomobject]@{ Valid = $false; State = "partial"; Origin = $null; Message = "vendor\\StableGen exists but is not a Git repository" }
+    }
+    $git = Get-GitInfo
+    if (-not $git.Installed) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Git is unavailable" }
+    }
+    $originProbe = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewRepoRoot, "remote", "get-url", "origin")
+    if ($originProbe.ExitCode -ne 0 -or $originProbe.Output.Count -eq 0) {
+        return [pscustomobject]@{ Valid = $false; State = "blocked"; Origin = $null; Message = "Could not read StableGen origin" }
+    }
+    $origin = $originProbe.Output[0].ToString().Trim()
+    if ((Normalize-GitRemoteUrl $origin) -ne (Normalize-GitRemoteUrl $MultiViewRepoUrl)) {
+        return [pscustomobject]@{ Valid = $false; State = "wrong-origin"; Origin = $origin; Message = "Unexpected StableGen origin" }
+    }
+    foreach ($required in @(
+        (Join-Path $MultiViewVendorRoot "__init__.py"),
+        (Join-Path $MultiViewVendorRoot "core\\__init__.py")
+    )) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            return [pscustomobject]@{ Valid = $false; State = "incomplete"; Origin = $origin; Message = "StableGen addon source is incomplete" }
+        }
+    }
+    return [pscustomobject]@{ Valid = $true; State = "ready"; Origin = $origin; Message = "Official StableGen repository present" }
+}
+
+function Get-MultiViewGitState {
+    $git = Get-GitInfo
+    if (-not $git.Installed -or -not (Test-Path -LiteralPath (Join-Path $MultiViewRepoRoot ".git") -PathType Container)) { return $null }
+    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewRepoRoot, "rev-parse", "HEAD")
+    $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewRepoRoot, "status", "--porcelain", "--untracked-files=no")
+    return [pscustomobject]@{
+        Head = if ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0) { $head.Output[0].ToString().Trim() } else { $null }
+        Dirty = ($dirty.ExitCode -ne 0 -or $dirty.Output.Count -gt 0)
+    }
+}
+
+function Ensure-MultiViewRepository {
+    $git = Get-GitInfo
+    if (-not $git.Installed) { throw "Git is required before preparing StableGen." }
+    $vendor = Split-Path -Parent $MultiViewRepoRoot
+    if (-not (Test-Path -LiteralPath $vendor -PathType Container)) { New-Item -ItemType Directory -Path $vendor -Force | Out-Null }
+
+    $state = Test-MultiViewRepository
+    if ($state.State -eq "missing") {
+        if ($NoInstall) { throw "StableGen repository is missing and -NoInstall is active." }
+        Write-Result "INFO" "Cloning official StableGen repository..."
+        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $MultiViewRepoUrl, $MultiViewRepoRoot)
+        if ($clone.ExitCode -ne 0) { throw "Could not clone StableGen: $($clone.Output -join ' | ')" }
+        $state = Test-MultiViewRepository
+    } elseif ($state.State -eq "partial") {
+        $entries = @(Get-ChildItem -LiteralPath $MultiViewRepoRoot -Force -ErrorAction SilentlyContinue)
+        if ($entries.Count -eq 0 -and -not $NoInstall) {
+            Remove-Item -LiteralPath $MultiViewRepoRoot -Force
+            $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $MultiViewRepoUrl, $MultiViewRepoRoot)
+            if ($clone.ExitCode -ne 0) { throw "Could not clone StableGen: $($clone.Output -join ' | ')" }
+            $state = Test-MultiViewRepository
+        } else {
+            throw "vendor\\StableGen is not the managed Git repository. Nothing was deleted."
+        }
+    }
+    if (-not $state.Valid) {
+        if ($state.State -eq "wrong-origin") { throw "vendor\\StableGen has unexpected origin '$($state.Origin)'. Nothing was modified." }
+        throw "StableGen repository is incomplete or invalid: $($state.Message)"
+    }
+
+    $gitState = Get-MultiViewGitState
+    if ($null -eq $gitState) { throw "Could not inspect StableGen Git state." }
+    if ($gitState.Dirty) { throw "StableGen tracked files contain local changes. Refusing to overwrite them." }
+    if ($gitState.Head -ne $MultiViewPinnedCommit) {
+        if ($NoInstall) { throw "StableGen is not pinned to $MultiViewPinnedCommit and -NoInstall is active." }
+        Write-Result "INFO" "Pinning StableGen to $MultiViewPinnedCommit..."
+        $fetch = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewRepoRoot, "fetch", "origin", $MultiViewPinnedCommit)
+        if ($fetch.ExitCode -ne 0) { throw "Could not fetch StableGen pin: $($fetch.Output -join ' | ')" }
+        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewRepoRoot, "checkout", "--detach", $MultiViewPinnedCommit)
+        if ($checkout.ExitCode -ne 0) { throw "Could not checkout StableGen pin: $($checkout.Output -join ' | ')" }
+    }
+    $gitState = Get-MultiViewGitState
+    if ($gitState.Head -ne $MultiViewPinnedCommit) { throw "StableGen HEAD is not the validated pin $MultiViewPinnedCommit." }
+    Write-Result "OK" "StableGen pinned to $MultiViewPinnedCommit"
+}
+
 function Get-MultiViewBlenderPython {
     $blender = Get-BlenderInfo
     if (-not $blender.Installed) { return $null }
@@ -4851,12 +5095,29 @@ function Ensure-MultiViewFile {
     Write-Result "OK" "$Label prêt"
 }
 
+function Test-MultiViewBlenderDependencies {
+    $python = Get-MultiViewBlenderPython
+    if ([string]::IsNullOrWhiteSpace($python)) { return $false }
+    if (-not (Test-Path -LiteralPath $MultiViewDepsRoot -PathType Container)) { return $false }
+    $oldPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = $MultiViewDepsRoot
+        $code = "import importlib.metadata as m; expected={'requests':'2.32.3','websocket-client':'1.8.0','imageio':'2.37.0','imageio-ffmpeg':'0.6.0','opencv-python-headless':'4.11.0.86','pillow':'11.2.1'}; bad=[k for k,v in expected.items() if (m.version(k) if True else '') != v]; print('MULTIVIEW_DEPS_OK' if not bad else 'BAD:'+','.join(bad)); raise SystemExit(0 if not bad else 1)"
+        & $python -c $code *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $env:PYTHONPATH = $oldPythonPath
+    }
+}
+
 function Ensure-MultiViewBlenderDependencies {
     param([switch]$CheckOnly)
 
     $blender = Get-BlenderInfo
     if (-not $blender.Installed) {
-        if ($NoInstall) { throw "Blender est requis pour le mode multi-vues." }
+        if ($CheckOnly -or $NoInstall) { throw "Blender est requis pour le mode multi-vues." }
         Install-WingetPackage -Id "BlenderFoundation.Blender" -DisplayName "Blender"
         Refresh-ProcessPath
         $blender = Get-BlenderInfo
@@ -4864,44 +5125,32 @@ function Ensure-MultiViewBlenderDependencies {
     }
 
     $python = Get-MultiViewBlenderPython
-    if ([string]::IsNullOrWhiteSpace($python)) {
-        throw "Python embarqué de Blender introuvable sous $($blender.Path)."
+    if ([string]::IsNullOrWhiteSpace($python)) { throw "Python embarqué de Blender introuvable sous $($blender.Path)." }
+
+    if (Test-MultiViewBlenderDependencies) {
+        Write-Result "OK" "Dépendances Blender multi-vues déjà conformes"
+        return
     }
+    if ($CheckOnly -or $NoInstall) { throw "Dépendances Blender multi-vues absentes ou versions différentes des versions épinglées." }
 
     New-Item -ItemType Directory -Path $MultiViewDepsRoot -Force | Out-Null
     & $python -m pip --version *> $null
     if ($LASTEXITCODE -ne 0) {
-        if ($CheckOnly -or $NoInstall) {
-            throw "pip est absent de Python Blender."
-        }
         & $python -m ensurepip --upgrade | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "Impossible d'activer pip dans Python Blender." }
     }
 
-    # L'installation ne doit avoir lieu que pendant install/repair.
-    # Le doctor valide l'environnement existant sans relancer pip.
-    if (-not $CheckOnly -and -not $NoInstall) {
-        & $python -m pip install --disable-pip-version-check --upgrade --target $MultiViewDepsRoot "requests==2.32.3" | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Installation de requests pour Blender échouée." }
+    & $python -m pip install --disable-pip-version-check --upgrade --target $MultiViewDepsRoot "requests==2.32.3" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Installation de requests pour Blender échouée." }
+    & $python -m pip install --disable-pip-version-check --upgrade --no-deps --target $MultiViewDepsRoot `
+        "websocket-client==1.8.0" `
+        "imageio==2.37.0" `
+        "imageio-ffmpeg==0.6.0" `
+        "opencv-python-headless==4.11.0.86" `
+        "pillow==11.2.1" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Installation des dépendances Blender multi-vues échouée." }
 
-        & $python -m pip install --disable-pip-version-check --upgrade --no-deps --target $MultiViewDepsRoot `
-            "websocket-client==1.8.0" `
-            "imageio==2.37.0" `
-            "imageio-ffmpeg==0.6.0" `
-            "opencv-python-headless==4.11.0.86" `
-            "pillow==11.2.1" | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Installation des dépendances Blender multi-vues échouée." }
-    }
-
-    $oldPythonPath = $env:PYTHONPATH
-    try {
-        $env:PYTHONPATH = $MultiViewDepsRoot
-        & $python -c "import cv2, imageio, imageio_ffmpeg, requests, websocket; from PIL import Image; print('OK')" | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Validation des dépendances Blender multi-vues échouée." }
-    }
-    finally {
-        $env:PYTHONPATH = $oldPythonPath
-    }
+    if (-not (Test-MultiViewBlenderDependencies)) { throw "Validation des dépendances Blender multi-vues échouée." }
     Write-Result "OK" "Dépendances Blender multi-vues validées"
 }
 
@@ -5003,10 +5252,16 @@ function Test-MultiViewModelFiles {
 
 function Show-MultiViewStatus {
     Write-Header "Multi-vues Status"
-    if (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container) {
-        Write-Result "OK" "Module Blender multi-vues présent"
+    $repo = Test-MultiViewRepository
+    if ($repo.Valid) {
+        $gitState = Get-MultiViewGitState
+        if ($null -ne $gitState -and $gitState.Head -eq $MultiViewPinnedCommit) {
+            Write-Result "OK" "StableGen présent et épinglé ($MultiViewPinnedCommit)"
+        } else {
+            Write-Result "WARN" "StableGen présent mais pas sur la révision validée"
+        }
     } else {
-        Write-Result "MISSING" "Module Blender multi-vues absent"
+        Write-Result "MISSING" "StableGen : $($repo.Message)"
     }
     if (Test-Path -LiteralPath $MultiViewDriver -PathType Leaf) {
         Write-Result "OK" "Driver interne présent"
@@ -5031,9 +5286,11 @@ function Invoke-MultiViewDoctor {
     Write-Header "Multi-vues Doctor"
     $failures = 0
 
-    if (-not (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container)) {
-        Write-Result "FAIL" "Module Blender multi-vues absent"; $failures++
-    } else { Write-Result "OK" "Module Blender multi-vues présent" }
+    $repo = Test-MultiViewRepository
+    $gitState = if ($repo.Valid) { Get-MultiViewGitState } else { $null }
+    if (-not $repo.Valid -or $null -eq $gitState -or $gitState.Head -ne $MultiViewPinnedCommit) {
+        Write-Result "FAIL" "StableGen repository/pin invalid: $($repo.Message)"; $failures++
+    } else { Write-Result "OK" "StableGen pinned repository valid" }
 
     if (-not (Test-Path -LiteralPath $MultiViewDriver -PathType Leaf)) {
         Write-Result "FAIL" "Driver interne absent"; $failures++
@@ -5085,9 +5342,7 @@ function Invoke-MultiViewInstall {
         Invoke-ComfyUiInstall
     }
 
-    if (-not (Test-Path -LiteralPath $MultiViewVendorRoot -PathType Container)) {
-        throw "Le module Blender multi-vues fourni avec Asset Factory est absent : $MultiViewVendorRoot"
-    }
+    Ensure-MultiViewRepository
     if (-not (Test-Path -LiteralPath $MultiViewDriver -PathType Leaf)) {
         throw "Driver interne multi-vues absent : $MultiViewDriver"
     }
@@ -5215,69 +5470,107 @@ function Show-Status {
     } else {
         Write-Result "INFO" "FLUX Schnell model not ready; run .\setup-asset-factory.ps1 comfyui model-install"
     }
+
+    $toolchain = Get-TrellisNativeToolchainInfo
+    if ($toolchain.VsInstalled) { Write-Result "OK" "VS2022 C++ Build Tools / MSVC $($toolchain.MsvcToolset)" }
+    else { Write-Result "INFO" "VS2022 C++ Build Tools not ready; full install will add them" }
+    if ($toolchain.CudaPresent -and $toolchain.NvccVersion -eq "13.4") { Write-Result "OK" "CUDA Toolkit 13.4" }
+    else { Write-Result "INFO" "CUDA Toolkit 13.4 not ready; full install will add it" }
+
+    $multiRepo = Test-MultiViewRepository
+    if ($multiRepo.Valid) {
+        $multiGit = Get-MultiViewGitState
+        if ($null -ne $multiGit -and $multiGit.Head -eq $MultiViewPinnedCommit) { Write-Result "OK" "StableGen pinned repository installed" }
+        else { Write-Result "WARN" "StableGen repository present but not pinned to the validated commit" }
+    } else {
+        Write-Result "INFO" "StableGen not ready; full install will clone/pin it"
+    }
 }
 
-function Invoke-Install {
-    Write-Header "Install"
-
+function Invoke-CoreInstall {
+    Write-Header "Core Install"
     Assert-BootstrapHost
 
-    Ensure-Directories
-    Ensure-GitIgnore
-    Ensure-DocumentationSkeleton
-    Ensure-Readme
+    if (-not $NoInstall) {
+        Ensure-Directories
+        Ensure-GitIgnore
+        Ensure-DocumentationSkeleton
+        Ensure-Readme
+    } else {
+        Write-Result "INFO" "-NoInstall: core validation only; repository files will not be created or modified."
+    }
 
     $git = Get-GitInfo
     if (-not $git.Installed) {
-        if ($NoInstall) {
-            Write-Result "MISSING" "Git not installed"
-        } else {
+        if ($NoInstall) { Write-Result "MISSING" "Git not installed" }
+        else {
             Install-WingetPackage -Id "Git.Git" -DisplayName "Git"
             Assert-DetectedAfterInstall -DisplayName "Git" -Detector { (Get-GitInfo).Installed }
-            $git = Get-GitInfo
         }
-    } else {
-        Write-Result "OK" "Reusing existing Git: $($git.Path)"
-    }
+    } else { Write-Result "OK" "Reusing existing Git: $($git.Path)" }
 
     $python = Get-PythonInfo
     if (-not $python.Installed) {
-        if ($NoInstall) {
-            Write-Result "MISSING" "Python not installed"
-        } else {
-            # Uniquement le Python de bootstrap partagé. Les environnements Python des moteurs restent isolés et épinglés séparément.
+        if ($NoInstall) { Write-Result "MISSING" "Python not installed" }
+        else {
             Install-WingetPackage -Id "Python.Python.3.12" -DisplayName "Python 3.12"
             Assert-DetectedAfterInstall -DisplayName "Python" -Detector { (Get-PythonInfo).Installed }
-            $python = Get-PythonInfo
         }
-    } else {
-        Write-Result "OK" "Reusing existing Python: $($python.Path)"
-    }
+    } else { Write-Result "OK" "Reusing existing Python: $($python.Path)" }
 
     $blender = Get-BlenderInfo
     if (-not $blender.Installed) {
-        if ($NoInstall) {
-            Write-Result "MISSING" "Blender not installed"
-        } else {
+        if ($NoInstall) { Write-Result "MISSING" "Blender not installed" }
+        else {
             Install-WingetPackage -Id "BlenderFoundation.Blender" -DisplayName "Blender"
             Assert-DetectedAfterInstall -DisplayName "Blender" -Detector { (Get-BlenderInfo).Installed }
-            $blender = Get-BlenderInfo
         }
-    } else {
-        Write-Result "OK" "Reusing existing Blender: $($blender.Path)"
-    }
+    } else { Write-Result "OK" "Reusing existing Blender: $($blender.Path)" }
 
-    Ensure-GitRepository
-
-    Write-Result "INFO" "TripoSR remains an opt-in engine install: .\setup-asset-factory.ps1 triposr install"
-    Write-Result "INFO" "ComfyUI remains an opt-in engine install: .\setup-asset-factory.ps1 comfyui install"
-    Write-Result "INFO" "TRELLIS remains opt-in: .\setup-asset-factory.ps1 trellis install"
-    Write-Result "INFO" "Each AI engine uses its own isolated Python environment."
-
-    Show-Status
+    if (-not $NoInstall) { Ensure-GitRepository }
 }
 
-function Invoke-Doctor {
+function Invoke-Install {
+    Write-Header "Full Install"
+    Invoke-CoreInstall
+
+    if ($CoreOnly) {
+        Write-Result "INFO" "-CoreOnly requested: AI engines/models/native toolchain were intentionally skipped."
+        Show-Status
+        return
+    }
+
+    if ($NoInstall) {
+        $validation = Invoke-Doctor
+        if ($validation -ne 0) { throw "Full Asset Factory validation failed while -NoInstall was active." }
+        return
+    }
+
+    # System prerequisites are converged before native Python packages are built.
+    # The display driver is intentionally not installed generically: it is hardware-specific.
+    $null = Assert-NvidiaDriverReady
+    $null = Ensure-Vs2022CppBuildTools
+    $null = Ensure-Cuda134Toolkit
+
+    # Every stage below is itself idempotent: pinned repos/venvs/models are reused
+    # and only missing or invalid pieces are repaired.
+    Invoke-ComfyUiInstall
+    Invoke-ComfyUiModelInstall
+
+    Invoke-TrellisInstall
+    Invoke-TrellisRuntimeInstall
+    Invoke-TrellisNativeInstall
+    Invoke-TrellisModelPreparation
+
+    Invoke-TripoSrInstall
+    Invoke-MultiViewInstall
+
+    $doctorExit = Invoke-Doctor
+    if ($doctorExit -ne 0) { throw "Installation completed but the full doctor still reports blocking issues." }
+    Write-Result "OK" "ASSET FACTORY READY"
+}
+
+function Invoke-CoreDoctor {
     Write-Header "Doctor"
 
     $failures = 0
@@ -5384,12 +5677,58 @@ function Invoke-Doctor {
     return 0
 }
 
+function Invoke-Doctor {
+    if ($CoreOnly) { return (Invoke-CoreDoctor) }
+
+    Write-Header "Full Doctor"
+    $failures = 0
+
+    if ((Invoke-CoreDoctor) -ne 0) { $failures++ }
+
+    $gpu = Get-NvidiaInfo
+    if (-not $gpu.Available) {
+        Write-Result "FAIL" "NVIDIA driver/GPU is not available through nvidia-smi."
+        $failures++
+    } else {
+        Write-Result "OK" "NVIDIA driver/GPU ready for AI engines"
+    }
+
+    try {
+        $toolchain = Get-TrellisNativeToolchainInfo
+        if (-not $toolchain.VsInstalled) { throw "VS2022 C++ Build Tools are missing." }
+        if (-not $toolchain.CudaPresent -or $toolchain.NvccVersion -ne "13.4") { throw "CUDA Toolkit 13.4 is missing." }
+        if (-not $toolchain.IntegrationValid) { throw "CUDA 13.4 VS2022 integration is missing." }
+        Write-Result "OK" "Native Windows toolchain ready (VS2022 + CUDA 13.4)"
+    } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+
+    try { if ((Invoke-ComfyUiDoctor) -ne 0) { $failures++ } } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+    $flux = Test-ComfyUiFluxModel
+    if ($flux.Present) { Write-Result "OK" "FLUX Schnell model ready" }
+    else { Write-Result "FAIL" "FLUX Schnell model missing/incomplete"; $failures++ }
+
+    try { if ((Invoke-TrellisDoctor) -ne 0) { $failures++ } } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+    try { if ((Invoke-TrellisRuntimeDoctor) -ne 0) { $failures++ } } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+    try { if ((Invoke-TrellisNativeDoctor) -ne 0) { $failures++ } } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+    try { Invoke-TrellisModelPreparation -CheckOnly } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+
+    try { if ((Invoke-TripoSrDoctor) -ne 0) { $failures++ } } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+    try { if ((Invoke-MultiViewDoctor) -ne 0) { $failures++ } } catch { Write-Result "FAIL" $_.Exception.Message; $failures++ }
+
+    if ($failures -gt 0) {
+        Write-Result "FAIL" "Full doctor found $failures blocking subsystem issue(s)."
+        return 1
+    }
+    Write-Result "OK" "ASSET FACTORY READY"
+    return 0
+}
+
 function Show-Help {
     @"
 Asset Factory bootstrap setup v$ScriptVersion
 
 Usage:
   .\setup-asset-factory.ps1 install
+  .\setup-asset-factory.ps1 install -CoreOnly
   .\setup-asset-factory.ps1 install -NoInstall
   .\setup-asset-factory.ps1 status
   .\setup-asset-factory.ps1 doctor
@@ -5424,10 +5763,11 @@ Usage:
   .\setup-asset-factory.ps1 help
 
 Commands:
-  install   Create the minimal repository structure and install missing shared tools.
-            Existing installations are reused whenever possible.
+  install   Converge a complete Asset Factory workstation: shared tools, VS2022 C++ Build Tools,
+            CUDA 13.4, ComfyUI+FLUX, TRELLIS runtime/native/models, TripoSR and StableGen multiview.
+            Existing valid installations are reused.
   status    Show detected tools, paths, versions, repository state and GPU information.
-  doctor    Run smoke tests for Git, Python, Blender headless, GPU query and repository structure.
+  doctor    Validate the complete stack. Use -CoreOnly to validate shared bootstrap tools only.
   triposr   Manage the isolated TripoSR engine. Subcommands: install, status, doctor, repair, smoke.
   comfyui   Manage the isolated ComfyUI engine. Subcommands: install, status, doctor, smoke, repair, model-install.
   multiview Install/validate the integrated Blender multiview texturing path.
@@ -5437,16 +5777,18 @@ Commands:
   help      Show this help.
 
 Options:
-  -NoInstall  Initialize/detect only. Never invoke winget or install missing engine packages.
+  -CoreOnly   Limit install/doctor to Git, Python, Blender and repository bootstrap.
+  -NoInstall  Validation only. Never invoke winget, clone/pin repositories or install packages/models.
 
 Important:
   - This bootstrap targets Windows 11 and requires Windows PowerShell 5.1+ or PowerShell 7+.
-  - TripoSR is opt-in: use `triposr install`; it never installs packages into global Python.
-  - ComfyUI is opt-in: use `comfyui install`; it uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
-  - The FLUX Schnell checkpoint is opt-in: use `comfyui model-install`; an existing valid checkpoint is reused.
-  - Multi-view texturing is opt-in; use `multiview install`, then enable -Multiview `$true in the normal generation command.
+  - Full `install` prepares all Asset Factory engines and required model bundles. Use -CoreOnly for the old minimal bootstrap.
+  - A working NVIDIA display driver is the one manual machine prerequisite; CUDA Toolkit 13.4 is installed separately by this setup.
+  - Unreal Engine remains optional and is only required when a project profile requests automatic import.
+  - ComfyUI uses its own Python 3.11 venv, PyTorch CUDA 13.0 and pinned ComfyUI v0.35.0.
+  - StableGen is cloned from its official repository and pinned to the validated Asset Factory revision.
   - TRELLIS v1 is pinned to a validated source revision and uses separate bootstrap/runtime venvs.
-  - TRELLIS runtime PyTorch CUDA 13 is isolated; the system CUDA Toolkit used by other engines is not replaced.
+  - TRELLIS runtime PyTorch CUDA 13 is isolated; the system CUDA Toolkit 13.4 is used only for native extension builds.
   - AF-08C uses PyTorch SDPA on Blackwell. Upstream TRELLIS 442aa1e has no sparse SDPA backend; unsupported xformers builds are removed rather than selected.
   - `trellis native-install` installs native TRELLIS extensions from public upstream source checkouts under the ignored runtime tree and validates each component.
   - Windows native builds are pinned to the detected VS2022 Build Tools environment so setuptools cannot silently select a newer Visual Studio toolchain.

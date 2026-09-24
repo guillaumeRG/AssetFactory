@@ -14,7 +14,15 @@ param(
     [int]$Candidates = 1,
     [string]$Preset = "",
     [string[]]$Exclude = @(),
-    [string]$MultiviewMethod = "none",
+    [bool]$Multiview = $false,
+    [ValidateRange(1, 100)]
+    [int]$MultiviewCameras = 8,
+    [ValidateRange(256, 8192)]
+    [int]$TextureResolution = 2048,
+    [string]$TextureCheckpoint = "RealVisXL_V5.0_fp16.safetensors",
+    [string]$TexturePrompt = "",
+    [string]$TextureNegativePrompt = "",
+    [bool]$KeepProjectedBlend = $false,
     [ValidateSet("none", "qa")]
     [string]$Postprocess = "none",
 
@@ -122,8 +130,32 @@ try {
         }
         $preset = [string](Get-BatchSetting $Asset $Batch "preset" "Preset" "")
         $exclude = @(Get-BatchSetting $Asset $Batch "exclude" "Exclude" @())
-        $multiviewMethod = [string](Get-BatchSetting $Asset $Batch "multiviewMethod" "MultiviewMethod" "none")
-        if ([string]::IsNullOrWhiteSpace($multiviewMethod)) { $multiviewMethod = "none" }
+
+        $multiview = Get-BatchSetting $Asset $Batch "multiview" "Multiview" $false
+        if ($multiview -isnot [bool]) { throw "Asset '$id': multiview must be a JSON boolean." }
+        if ($multiview -and $assetEngine -ne "trellis") { throw "Asset '$id': multiview requires engine 'trellis'." }
+        $multiviewCameras = Get-BatchSetting $Asset $Batch "multiviewCameras" "MultiviewCameras" 8
+        if ($multiviewCameras -is [string] -or $multiviewCameras -is [bool] -or $null -eq $multiviewCameras -or
+            [int]$multiviewCameras -lt 1 -or [int]$multiviewCameras -gt 100) {
+            throw "Asset '$id': multiviewCameras must be an integer between 1 and 100."
+        }
+        $textureResolution = Get-BatchSetting $Asset $Batch "textureResolution" "TextureResolution" 2048
+        if ($textureResolution -is [string] -or $textureResolution -is [bool] -or $null -eq $textureResolution -or
+            [int]$textureResolution -lt 256 -or [int]$textureResolution -gt 8192) {
+            throw "Asset '$id': textureResolution must be an integer between 256 and 8192."
+        }
+        $textureCheckpoint = [string](Get-BatchSetting $Asset $Batch "textureCheckpoint" "TextureCheckpoint" "RealVisXL_V5.0_fp16.safetensors")
+        if ($multiview -and [string]::IsNullOrWhiteSpace($textureCheckpoint)) { throw "Asset '$id': textureCheckpoint cannot be empty with multiview." }
+        $texturePrompt = [string](Get-BatchSetting $Asset $Batch "texturePrompt" "TexturePrompt" "")
+        if ([string]::IsNullOrWhiteSpace($texturePrompt) -and -not [string]::IsNullOrWhiteSpace($prompt)) { $texturePrompt = $prompt }
+        $textureNegativePrompt = [string](Get-BatchSetting $Asset $Batch "textureNegativePrompt" "TextureNegativePrompt" "")
+        if ([string]::IsNullOrWhiteSpace($textureNegativePrompt)) { $textureNegativePrompt = [string](Get-AFProperty $Asset "negativePrompt" "") }
+        $keepProjectedBlend = Get-BatchSetting $Asset $Batch "keepProjectedBlend" "KeepProjectedBlend" $false
+        if ($keepProjectedBlend -isnot [bool]) { throw "Asset '$id': keepProjectedBlend must be a JSON boolean." }
+        if ($multiview -and -not [string]::IsNullOrWhiteSpace($inputPath) -and [string]::IsNullOrWhiteSpace($texturePrompt)) {
+            throw "Asset '$id': texturePrompt (or prompt) is required for an image-input multiview asset."
+        }
+
         $postprocess = [string](Get-BatchSetting $Asset $Batch "postprocess" "Postprocess" "none")
         $postprocess = $postprocess.ToLowerInvariant()
         if ($postprocess -notin @("none", "qa")) { throw "Asset '$id': postprocess must be 'none' or 'qa'." }
@@ -159,7 +191,13 @@ try {
             candidates = [int]$candidates
             preset = $preset
             exclude = @($exclude)
-            multiviewMethod = $multiviewMethod
+            multiview = [bool]$multiview
+            multiviewCameras = [int]$multiviewCameras
+            textureResolution = [int]$textureResolution
+            textureCheckpoint = $textureCheckpoint
+            texturePrompt = $texturePrompt
+            textureNegativePrompt = $textureNegativePrompt
+            keepProjectedBlend = [bool]$keepProjectedBlend
             postprocess = $postprocess
             engine = $assetEngine
             targetHeight = [double]$height
@@ -255,7 +293,13 @@ try {
                 AssetId = $ActiveRecord.id
                 Seed = $ActiveRecord.seed
                 GeometryMethod = $ActiveRecord.engine
-                MultiviewMethod = $ActiveRecord.multiviewMethod
+                Multiview = $ActiveRecord.multiview
+                MultiviewCameras = $ActiveRecord.multiviewCameras
+                TextureResolution = $ActiveRecord.textureResolution
+                TextureCheckpoint = $ActiveRecord.textureCheckpoint
+                TexturePrompt = $ActiveRecord.texturePrompt
+                TextureNegativePrompt = $ActiveRecord.textureNegativePrompt
+                KeepProjectedBlend = $ActiveRecord.keepProjectedBlend
                 Postprocess = $ActiveRecord.postprocess
                 TargetHeight = $ActiveRecord.targetHeight
                 ProjectProfile = $ActiveRecord.projectProfile

@@ -1,4 +1,4 @@
-# Asset Factory V0.9
+# Asset Factory V0.9.1
 
 Asset Factory génère et prépare localement des assets 3D à partir d'un prompt texte ou d'une image.
 
@@ -10,7 +10,7 @@ Prompt
   -> texturing multi-vues optionnel
   -> import Unreal optionnel
 ```
-./app   
+
 Moteurs 3D pris en charge :
 
 - **TRELLIS**
@@ -57,41 +57,92 @@ Le mode multi-vues est optionnel et s'active avec `-Multiview $true`.
 
 ---
 
-## Prérequis
+## Prérequis machine
 
-- Windows PowerShell 5.1+ ou PowerShell 7+
-- GPU CUDA recommandé
-- Blender
-- Unreal Engine uniquement pour l'import automatique
+Pour l'installation complète :
+
+- Windows 11 x64 avec **App Installer / winget** disponible ;
+- PowerShell 5.1+ ou PowerShell 7+ ;
+- GPU NVIDIA compatible et **pilote NVIDIA déjà installé** (`nvidia-smi` doit fonctionner) ;
+- connexion Internet pour les dépôts, environnements Python et modèles.
+
+Le setup installe ou prépare automatiquement, uniquement lorsqu'ils sont absents ou invalides :
+
+- Git ;
+- Python 3.12, ainsi que les versions Python isolées requises par les moteurs ;
+- Blender ;
+- Visual Studio 2022 C++ Build Tools ;
+- CUDA Toolkit 13.4 et son intégration VS2022 ;
+- ComfyUI + FLUX Schnell ;
+- TRELLIS (bootstrap, runtime, extensions natives et modèles) ;
+- TripoSR ;
+- StableGen et les modèles de texturing multi-vues.
+
+Le pilote NVIDIA reste volontairement externe : depuis CUDA 13.1, le Toolkit Windows ne contient plus le pilote graphique. Unreal Engine reste également optionnel et n'est nécessaire que pour l'import automatique.
 
 ---
 
 ## Installation
 
+Si Git est déjà disponible :
+
 ```powershell
 git clone https://github.com/guillaumeRG/AssetFactory.git
 Set-Location .\AssetFactory
-
 .\setup-asset-factory.ps1 install
-
-.\setup-asset-factory.ps1 comfyui install
-.\setup-asset-factory.ps1 comfyui model-install
-
-.\setup-asset-factory.ps1 triposr install
-
-.\setup-asset-factory.ps1 trellis runtime-install
-.\setup-asset-factory.ps1 trellis model-install
-
-.\setup-asset-factory.ps1 multiview install
 ```
 
-Vérification :
+Sur un Windows réellement vierge sans Git, télécharge d'abord l'archive ZIP du dépôt, extrais-la, ouvre PowerShell dans le dossier extrait puis lance :
+
+```powershell
+.\setup-asset-factory.ps1 install
+```
+
+`install` est le chemin normal et **complet**. Il est idempotent : un second lancement réutilise les outils, dépôts épinglés, venvs et modèles déjà valides au lieu de tout réinstaller.
+
+Pour installer uniquement le socle Git/Python/Blender :
+
+```powershell
+.\setup-asset-factory.ps1 install -CoreOnly
+```
+
+Pour vérifier sans rien installer ni télécharger :
+
+```powershell
+.\setup-asset-factory.ps1 install -NoInstall
+```
+
+Vérification complète :
 
 ```powershell
 .\setup-asset-factory.ps1 status
 .\setup-asset-factory.ps1 doctor
-.\setup-asset-factory.ps1 multiview doctor
 ```
+
+Quand tout est prêt, le doctor termine par :
+
+```text
+[OK] ASSET FACTORY READY
+```
+
+### Installation manuelle par composant
+
+Le chemin complet précédent est recommandé. Pour diagnostiquer ou préparer les composants séparément :
+
+```powershell
+.\setup-asset-factory.ps1 comfyui install
+.\setup-asset-factory.ps1 comfyui model-install
+
+.\setup-asset-factory.ps1 trellis install
+.\setup-asset-factory.ps1 trellis runtime-install
+.\setup-asset-factory.ps1 trellis native-install
+.\setup-asset-factory.ps1 trellis model-install
+
+.\setup-asset-factory.ps1 triposr install
+.\setup-asset-factory.ps1 multiview install
+```
+
+L'ordre TRELLIS ci-dessus est important sur une machine neuve.
 
 ---
 
@@ -291,6 +342,21 @@ Pipeline complet :
     -Candidates 8 `
     -AutoImport $false
 ```
+
+Pipeline complet avec texturing multi-vues :
+
+```powershell
+.\tools\run-batch.ps1 `
+    -BatchPath ".\batches\mon-batch.json" `
+    -Mode full `
+    -Engine trellis `
+    -Multiview $true `
+    -MultiviewCameras 8 `
+    -TextureResolution 2048 `
+    -AutoImport $false
+```
+
+Les mêmes paramètres peuvent être placés dans le manifeste au niveau batch ou asset : `multiview`, `multiviewCameras`, `textureResolution`, `textureCheckpoint`, `texturePrompt`, `textureNegativePrompt` et `keepProjectedBlend`.
 
 ---
 

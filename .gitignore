@@ -28,3 +28,5 @@ profiles/*.json
 engines/trellis/
 engines/zero123plus/
 !profiles/multiview.example.json
+
+*.bak

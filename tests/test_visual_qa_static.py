@@ -40,12 +40,12 @@ class VisualQAStaticTests(unittest.TestCase):
         self.assertIn('Write-AFFail "Visual QA non bloquant', code)
 
     def test_multiview_pipeline_uses_same_visual_qa_function(self):
-        code = self.text("tools/run-multiview-to-3d.ps1")
-        self.assertIn("Invoke-AFVisualQA", code)
-        blender = code.index('Assert-AFFile -Path $expectedFinal -Label "Modèle final normalisé"')
-        qa = code.index("Invoke-AFVisualQA")
+        code = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn("Invoke-AFIntegratedMultiview", code)
+        multiview = code.index("$multiviewResult = Invoke-AFIntegratedMultiview")
+        qa = code.index("Invoke-AFVisualQA", multiview)
         unreal = code.index('$Stage = "unreal"', qa)
-        self.assertLess(blender, qa)
+        self.assertLess(multiview, qa)
         self.assertLess(qa, unreal)
 
     def test_batch_forwards_postprocess_to_public_asset_entrypoints(self):

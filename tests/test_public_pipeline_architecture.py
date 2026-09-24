@@ -19,15 +19,15 @@ class PublicPipelineArchitectureTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / path).is_file(), path)
 
-    def test_image_generation_is_shared_between_direct_and_multiview(self):
+    def test_image_generation_is_shared_and_multiview_is_integrated(self):
         direct = self.text("tools/run-image-to-3d.ps1")
-        multiview = self.text("tools/run-multiview.ps1")
         shared = self.text("tools/internal/AssetFactory.Pipeline.psm1")
         self.assertIn("Invoke-AFImageStage", direct)
-        self.assertIn("Invoke-AFImageStage", multiview)
+        self.assertIn("Invoke-AFIntegratedMultiview", direct)
         self.assertIn("function Invoke-AFImageStage", shared)
         self.assertIn("score-references", shared)
         self.assertIn("Candidates", shared)
+        self.assertFalse((ROOT / "tools/run-multiview.ps1").exists())
 
     def test_public_image_entrypoint_stops_after_image_stage(self):
         code = self.text("tools/generate-image.ps1")
@@ -48,14 +48,16 @@ class PublicPipelineArchitectureTests(unittest.TestCase):
         code = self.text("tools/generate-asset-from-prompt.ps1")
         self.assertIn("[int]$Candidates = 1", code)
         self.assertIn('[ValidateSet("trellis", "triposr")]', code)
-        self.assertIn('[string]$MultiviewMethod = "none"', code)
+        self.assertIn('[bool]$Multiview = $false', code)
+        self.assertIn('-Multiview $Multiview', code)
         self.assertIn("-InputKind Prompt", code)
 
-    def test_multiview_is_optional_and_not_an_image_generation_owner(self):
-        runner = self.text("tools/run-multiview.ps1")
-        self.assertIn("Invoke-AFImageStage", runner)
-        self.assertNotIn("reference-comfyui-{0:D2}", runner)
-        self.assertNotIn("score-references", runner)
+    def test_multiview_is_optional_inside_the_single_asset_pipeline(self):
+        runner = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn('[ValidateSet("single", "multiview")]', runner)
+        self.assertIn('if ($Mode -eq "multiview" -and $Engine -ne "trellis")', runner)
+        self.assertIn("Invoke-AFIntegratedMultiview", runner)
+        self.assertFalse((ROOT / "tools/run-multiview-to-3d.ps1").exists())
 
     def test_batch_uses_public_entrypoints(self):
         code = self.text("tools/run-batch.ps1")
@@ -63,6 +65,8 @@ class PublicPipelineArchitectureTests(unittest.TestCase):
         self.assertIn('"generate-asset-from-prompt.ps1"', code)
         self.assertIn('"generate-asset-from-image.ps1"', code)
         self.assertNotIn('$PipelineRunner = Join-Path $PSScriptRoot "run-image-to-3d.ps1"', code)
+        self.assertIn('Multiview = $ActiveRecord.multiview', code)
+        self.assertNotIn('MultiviewMethod', code)
 
     def test_reference_default_is_generic_not_multiview_specific(self):
         config = self.text("config/reference-presets.json")
