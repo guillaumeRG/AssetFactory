@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
@@ -300,6 +300,7 @@ $JobGeneratedDir = if ([string]::IsNullOrWhiteSpace($SourceSubfolder)) {
 $JobLogsDir = $Layout.LogsDir
 $ResolvedWorkflowOutput = Join-Path $JobWorkflowDir ($MetadataPrefix + "-workflow.json")
 $JobMetadataPath = Join-Path $Layout.MetadataDir ($MetadataPrefix + ".json")
+$ComfyRuntime = $null
 
 try {
     foreach ($directory in @($JobRoot, $JobWorkflowDir, $JobGeneratedDir, $JobLogsDir)) {
@@ -371,6 +372,34 @@ try {
 Write-Ok "Dossiers de génération prêts"
 Write-Ok "Workflow résolu enregistré : $ResolvedWorkflowOutput"
 Write-Ok "Métadonnées créées : $JobMetadataPath"
+
+try {
+    $ComfyRuntime = Start-AFComfyServer `
+        -Root $AssetFactoryRoot `
+        -ServerUrl $ServerUrl `
+        -LogDirectory $JobLogsDir `
+        -LogPrefix "comfyui-server"
+    $JobMetadata["serverAutoStarted"] = [bool]$ComfyRuntime.Started
+    $JobMetadata["serverStartupStdoutLogPath"] = $ComfyRuntime.StdoutPath
+    $JobMetadata["serverStartupStderrLogPath"] = $ComfyRuntime.StderrPath
+    Save-JobMetadata -Metadata $JobMetadata -Path $JobMetadataPath
+    if ($ComfyRuntime.Started) {
+        Write-Ok "ComfyUI démarré automatiquement : $($ComfyRuntime.BaseUrl)"
+    } else {
+        Write-Info "Réutilisation de ComfyUI : $($ComfyRuntime.BaseUrl)"
+    }
+} catch {
+    Set-JobFailed -Metadata $JobMetadata -MetadataPath $JobMetadataPath -Message $_.Exception.Message
+    if ($null -ne $StandaloneGeneration) {
+        $StandaloneGeneration.status = "failed"
+        $StandaloneGeneration.completedAt = (Get-Date).ToString("o")
+        $StandaloneGeneration.error = $_.Exception.Message
+        try { Save-AFJson -Value $StandaloneGeneration -Path $StandaloneGenerationPath } catch { }
+    }
+    Write-Fail "Le démarrage automatique de ComfyUI a échoué."
+    Write-Info $_.Exception.Message
+    exit 1
+}
 
 # -----------------------------------------------------------------------------
 # Exécution du job

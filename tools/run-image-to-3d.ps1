@@ -107,28 +107,6 @@ function Assert-StageSuccess {
 }
 
 
-function Test-AFComfyServer {
-    param([Parameter(Mandatory)][string]$BaseUrl)
-    try {
-        Invoke-RestMethod -Uri ($BaseUrl.TrimEnd("/") + "/queue") -Method Get -TimeoutSec 3 | Out-Null
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Wait-AFComfyServer {
-    param(
-        [Parameter(Mandatory)][string]$BaseUrl,
-        [int]$TimeoutSeconds = 180
-    )
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-AFComfyServer -BaseUrl $BaseUrl) { return }
-        Start-Sleep -Seconds 2
-    }
-    throw "ComfyUI n'est pas devenu disponible sur $BaseUrl."
-}
 
 function Invoke-AFIntegratedMultiview {
     param(
@@ -143,13 +121,7 @@ function Invoke-AFIntegratedMultiview {
     $vendorAddon = Join-Path $AssetFactoryRoot "vendor\StableGen\stablegen"
     $driver = Join-Path $PSScriptRoot "internal\multiview_texture_driver.py"
     $depsRoot = Join-Path $AssetFactoryRoot "cache\multiview\blender-python"
-    $comfyRoot = Join-Path $AssetFactoryRoot "engines\comfyui"
-    $comfyPython = Join-Path $comfyRoot ".venv\Scripts\python.exe"
-    $comfyMain = Join-Path $comfyRoot "main.py"
-
     Assert-AFFile -Path $driver -Label "Driver Blender multi-vues"
-    Assert-AFFile -Path $comfyPython -Label "Python ComfyUI"
-    Assert-AFFile -Path $comfyMain -Label "ComfyUI main.py"
     if (-not (Test-Path -LiteralPath $vendorAddon -PathType Container)) {
         throw "Module Blender multi-vues absent : $vendorAddon. Lancez '.\setup-asset-factory.ps1 multiview install'."
     }
@@ -158,7 +130,7 @@ function Invoke-AFIntegratedMultiview {
     }
 
     $uri = [Uri]$ServerUrl
-    $baseUrl = "{0}://{1}:{2}" -f $uri.Scheme, $uri.Host, $uri.Port
+    $baseUrl = Get-AFComfyServerBaseUrl -ServerUrl $ServerUrl
     $serverAddress = "{0}:{1}" -f $uri.Host, $uri.Port
     $startedComfy = $false
     $comfyProcess = $null
@@ -204,23 +176,19 @@ function Invoke-AFIntegratedMultiview {
     $oldUserConfig = $env:BLENDER_USER_CONFIG
     $oldPythonPath = $env:PYTHONPATH
     try {
-        if (-not (Test-AFComfyServer -BaseUrl $baseUrl)) {
-            if ($uri.Host -notin @("127.0.0.1", "localhost")) {
-                throw "Le démarrage automatique de ComfyUI est limité à localhost."
-            }
-            $comfyOut = Join-Path $Layout.LogsDir "multiview-comfyui.stdout.log"
-            $comfyErr = Join-Path $Layout.LogsDir "multiview-comfyui.stderr.log"
-            Write-AFInfo "Démarrage de ComfyUI pour le texturage multi-vues..."
-            $comfyProcess = Start-Process -FilePath $comfyPython `
-                -ArgumentList @("`"$comfyMain`"", "--lowvram", "--listen", $uri.Host, "--port", $uri.Port) `
-                -WorkingDirectory $comfyRoot `
-                -RedirectStandardOutput $comfyOut `
-                -RedirectStandardError $comfyErr `
-                -PassThru
-            $startedComfy = $true
-            Wait-AFComfyServer -BaseUrl $baseUrl -TimeoutSeconds 180
+        $comfyRuntime = Start-AFComfyServer `
+            -Root $AssetFactoryRoot `
+            -ServerUrl $ServerUrl `
+            -LogDirectory $Layout.LogsDir `
+            -LogPrefix "multiview-comfyui" `
+            -StartupTimeoutSeconds 180 `
+            -LowVram
+        $startedComfy = [bool]$comfyRuntime.Started
+        $comfyProcess = $comfyRuntime.Process
+        if ($startedComfy) {
+            Write-AFInfo "ComfyUI démarré automatiquement pour le texturage multi-vues : $($comfyRuntime.BaseUrl)"
         } else {
-            Write-AFInfo "Réutilisation de ComfyUI : $baseUrl"
+            Write-AFInfo "Réutilisation de ComfyUI : $($comfyRuntime.BaseUrl)"
         }
 
         New-Item -ItemType Directory -Path $runtimeConfig -Force | Out-Null

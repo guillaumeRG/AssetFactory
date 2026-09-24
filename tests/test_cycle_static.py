@@ -1,4 +1,4 @@
-"""Contrats statiques du cycle complet ; aucun moteur externe n'est exécuté."""
+﻿"""Contrats statiques du cycle complet ; aucun moteur externe n'est exécuté."""
 import json
 from pathlib import Path
 import unittest
@@ -82,6 +82,18 @@ class CycleStaticTests(unittest.TestCase):
         for filename in ['run-image-to-3d.ps1', 'run-batch.ps1', 'pipeline-common.ps1', 'run-trellis.ps1']:
             code = self.text('tools/' + filename)
             self.assertNotRegex(code, r"(?m)^\s*(import torch|from trellis|\$code\s*=\s*@')")
+
+    def test_comfy_autostart_is_shared(self):
+        common = self.text("tools/pipeline-common.ps1")
+        comfy = self.text("tools/run-comfyui.ps1")
+        pipeline = self.text("tools/run-image-to-3d.ps1")
+        self.assertIn('function Start-AFComfyServer {', common)
+        self.assertIn('function Wait-AFComfyServer {', common)
+        self.assertIn('function Test-AFComfyServer {', common)
+        self.assertIn('Start-AFComfyServer `', comfy)
+        self.assertIn('-LogPrefix "comfyui-server"', comfy)
+        self.assertIn('Start-AFComfyServer `', pipeline)
+        self.assertIn('-LogPrefix "multiview-comfyui"', pipeline)
 
     def test_comfy_release_is_not_an_interrupt_or_queue_clear(self):
         code = self.text("tools/pipeline-common.ps1")

@@ -216,6 +216,170 @@ function Resolve-AFGenerationLayout {
     return Initialize-AFGenerationLayout -GenerationRoot $resolved -Version $Version
 }
 
+function Get-AFComfyServerBaseUrl {
+    param([Parameter(Mandatory = $true)][string]$ServerUrl)
+
+    $uri = [Uri]$ServerUrl
+    return "{0}://{1}:{2}" -f $uri.Scheme, $uri.Host, $uri.Port
+}
+
+function Get-AFComfyEnginePaths {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $comfyRoot = Join-Path $Root "engines\comfyui"
+    $comfyPython = Join-Path $comfyRoot ".venv\Scripts\python.exe"
+    $comfyMain = Join-Path $comfyRoot "main.py"
+    Assert-AFFile -Path $comfyPython -Label "Python ComfyUI"
+    Assert-AFFile -Path $comfyMain -Label "ComfyUI main.py"
+
+    return [pscustomobject]@{
+        Root = $comfyRoot
+        PythonPath = $comfyPython
+        MainPath = $comfyMain
+    }
+}
+
+function Test-AFComfyServer {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [ValidateRange(1, 30)][int]$TimeoutSeconds = 3
+    )
+
+    try {
+        Invoke-RestMethod -Uri ($BaseUrl.TrimEnd("/") + "/queue") -Method Get -TimeoutSec $TimeoutSeconds | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-AFComfyStartupFailureDetails {
+    param(
+        [string]$StdoutPath = "",
+        [string]$StderrPath = ""
+    )
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($pair in @(
+        @{ Label = "stdout"; Path = $StdoutPath },
+        @{ Label = "stderr"; Path = $StderrPath }
+    )) {
+        $path = [string]$pair.Path
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+        try {
+            $tail = Get-Content -LiteralPath $path -Tail 40 -ErrorAction Stop
+            if ($null -ne $tail -and @($tail).Count -gt 0) {
+                $parts.Add(("{0}: {1}" -f $pair.Label, (($tail -join " | ").Trim())))
+            }
+        } catch {
+        }
+    }
+
+    if ($parts.Count -eq 0) {
+        return ""
+    }
+    return ($parts -join " || ")
+}
+
+function Wait-AFComfyServer {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 180,
+        [System.Diagnostics.Process]$Process = $null,
+        [string]$StdoutPath = "",
+        [string]$StderrPath = ""
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-AFComfyServer -BaseUrl $BaseUrl) {
+            return
+        }
+
+        if ($null -ne $Process) {
+            try {
+                $Process.Refresh()
+                if ($Process.HasExited) {
+                    $details = Get-AFComfyStartupFailureDetails -StdoutPath $StdoutPath -StderrPath $StderrPath
+                    if ([string]::IsNullOrWhiteSpace($details)) {
+                        throw "ComfyUI a quitté avant que son API ne devienne disponible (code $($Process.ExitCode))."
+                    }
+                    throw "ComfyUI a quitté avant que son API ne devienne disponible (code $($Process.ExitCode)). $details"
+                }
+            } catch {
+                throw
+            }
+        }
+
+        Start-Sleep -Seconds 2
+    }
+
+    $timeoutDetails = Get-AFComfyStartupFailureDetails -StdoutPath $StdoutPath -StderrPath $StderrPath
+    if ([string]::IsNullOrWhiteSpace($timeoutDetails)) {
+        throw "ComfyUI n'est pas devenu disponible sur $BaseUrl."
+    }
+    throw "ComfyUI n'est pas devenu disponible sur $BaseUrl. $timeoutDetails"
+}
+
+function Start-AFComfyServer {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$ServerUrl,
+        [Parameter(Mandatory = $true)][string]$LogDirectory,
+        [string]$LogPrefix = "comfyui-server",
+        [ValidateRange(1, 1800)][int]$StartupTimeoutSeconds = 180,
+        [switch]$LowVram
+    )
+
+    $uri = [Uri]$ServerUrl
+    $baseUrl = Get-AFComfyServerBaseUrl -ServerUrl $ServerUrl
+    if (Test-AFComfyServer -BaseUrl $baseUrl) {
+        return [pscustomobject]@{
+            Started = $false
+            Process = $null
+            BaseUrl = $baseUrl
+            StdoutPath = $null
+            StderrPath = $null
+        }
+    }
+
+    if ($uri.Host -notin @("127.0.0.1", "localhost")) {
+        throw "Le démarrage automatique de ComfyUI est limité à localhost."
+    }
+
+    $engine = Get-AFComfyEnginePaths -Root $Root
+    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+    $stdoutPath = Join-Path $LogDirectory ($LogPrefix + ".stdout.log")
+    $stderrPath = Join-Path $LogDirectory ($LogPrefix + ".stderr.log")
+
+    $arguments = @("`"$($engine.MainPath)`"")
+    if ($LowVram) {
+        $arguments += "--lowvram"
+    }
+    $arguments += @("--listen", $uri.Host, "--port", $uri.Port)
+
+    Write-AFInfo "Démarrage automatique de ComfyUI sur $baseUrl..."
+    $process = Start-Process -FilePath $engine.PythonPath `
+        -ArgumentList $arguments `
+        -WorkingDirectory $engine.Root `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+
+    Wait-AFComfyServer -BaseUrl $baseUrl -TimeoutSeconds $StartupTimeoutSeconds -Process $process -StdoutPath $stdoutPath -StderrPath $stderrPath
+
+    return [pscustomobject]@{
+        Started = $true
+        Process = $process
+        BaseUrl = $baseUrl
+        StdoutPath = $stdoutPath
+        StderrPath = $stderrPath
+    }
+}
+
+
 function Get-AFOutputValue {
     param([string[]]$Lines, [string]$Prefix, [switch]$Optional)
 
