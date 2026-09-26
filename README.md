@@ -321,42 +321,78 @@ Contrôle qualité visuel optionnel :
 
 ---
 
-## Batches
+## Batch manifests
 
-Image uniquement :
+Le quatrieme point d entree public est le runner de manifests V1 :
+
+```powershell
+.\tools\run-batch.ps1 -ManifestPath ".\batches\examples\images.json"
+```
+
+Un manifest est homogene et choisit exactement un `entryPoint` :
+
+```text
+generate-image
+generate-asset-from-image
+generate-asset-from-prompt
+```
+
+Le format est identifie strictement par `kind: "asset-factory-batch"` et `schemaVersion: 1`. `defaults` contient les parametres communs, `items[].params` les surcharge par item, et `items[].outputs` controle le nombre de generations finales. Les parametres acceptes sont derives des vrais scripts publics ; un parametre inconnu ou appartenant a un autre entrypoint est refuse avant toute generation.
+
+Exemple :
+
+```json
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "rocks",
+  "entryPoint": "generate-image",
+  "defaults": {
+    "candidates": 4
+  },
+  "items": [
+    {
+      "id": "basalt",
+      "prompt": "dark basalt rock, isolated object",
+      "outputs": {
+        "count": 3,
+        "seedStart": 1000,
+        "seedStep": 1
+      }
+    }
+  ]
+}
+```
+
+`candidates` et `outputs.count` n ont pas le meme role : `candidates: 4` fabrique quatre references internes pour choisir le resultat d UNE generation, alors que `outputs.count: 3` lance trois generations finales independantes. L exemple ci-dessus fait donc 3 appels finaux, chacun avec 4 candidates. Avec plusieurs outputs, les AssetIds deviennent `basalt__01`, `basalt__02`, etc. Avec un seul output, l AssetId reste `basalt`.
+
+Les seeds peuvent etre definies avec `seedStart` + `seedStep`, avec `seeds: [...]`, ou partir du `seed` effectif de l item. Les chemins relatifs du manifest (par exemple `inputPath`, `workflowPath`, `projectProfile`, `blenderPath`) sont resolus par rapport au dossier du manifest.
+
+Validation sans generation :
 
 ```powershell
 .\tools\run-batch.ps1 `
-    -BatchPath ".\batches\mon-batch.json" `
-    -Mode images `
-    -Candidates 8
+    -ManifestPath ".\batches\examples\assets-from-prompts.json" `
+    -ValidateOnly
 ```
 
-Pipeline complet :
+Reprise du dernier run incomplet compatible :
 
 ```powershell
 .\tools\run-batch.ps1 `
-    -BatchPath ".\batches\mon-batch.json" `
-    -Mode full `
-    -Engine trellis `
-    -Candidates 8 `
-    -AutoImport $false
+    -ManifestPath ".\batches\examples\assets-from-prompts.json" `
+    -Resume
 ```
 
-Pipeline complet avec texturing multi-vues :
+`execution.continueOnError` controle l arret apres un echec. Batch V1 est volontairement sequentiel et accepte uniquement `maxParallelism: 1`. Chaque run normal cree `outputs/batches/<batchId>/<runId>/` avec le manifest original, le plan resolu, `batch-run.json`, `items.json`, `results.json` et les logs.
 
-```powershell
-.\tools\run-batch.ps1 `
-    -BatchPath ".\batches\mon-batch.json" `
-    -Mode full `
-    -Engine trellis `
-    -Multiview $true `
-    -MultiviewCameras 8 `
-    -TextureResolution 2048 `
-    -AutoImport $false
+Exemples complets :
+
+```text
+batches/examples/images.json
+batches/examples/assets-from-images.json
+batches/examples/assets-from-prompts.json
 ```
-
-Les mêmes paramètres peuvent être placés dans le manifeste au niveau batch ou asset : `multiview`, `multiviewCameras`, `textureResolution`, `textureCheckpoint`, `texturePrompt`, `textureNegativePrompt` et `keepProjectedBlend`.
 
 ---
 
@@ -404,6 +440,8 @@ Tests du cycle :
 
 ```powershell
 .\tests\test-cycle-contracts.ps1
+.\tests\test-batch-contracts.ps1
+python -m pytest
 ```
 
 ---
@@ -413,6 +451,7 @@ Tests du cycle :
 ```text
 AssetFactory/
 ├─ batches/
+│  └─ examples/
 ├─ blender/
 ├─ config/
 ├─ docs/
@@ -420,6 +459,7 @@ AssetFactory/
 ├─ models/
 ├─ outputs/
 ├─ profiles/
+├─ schemas/
 ├─ tools/
 │  ├─ generate-image.ps1
 │  ├─ generate-asset-from-image.ps1

@@ -86,8 +86,9 @@ try {
     # Vérifie d'abord que les scripts livrés sont syntaxiquement valides pour PowerShell.
     foreach ($path in @(
         "tools\pipeline-common.ps1", "tools\run-comfyui.ps1", "tools\run-triposr.ps1",
-        "tools\run-image-to-3d.ps1", "tools\run-batch.ps1", "tools\run-trellis.ps1",
-        "tools\import-unreal.ps1", "setup-asset-factory.ps1"
+        "tools\run-image-to-3d.ps1", "tools\run-batch.ps1", "tools\internal\AssetFactory.Batch.psm1", "tools\internal\AssetFactory.Pipeline.psm1",
+        "tools\generate-image.ps1", "tools\generate-asset-from-image.ps1", "tools\generate-asset-from-prompt.ps1",
+        "tools\run-trellis.ps1", "tools\import-unreal.ps1", "setup-asset-factory.ps1"
     )) {
         $tokens = $null
         $parseErrors = $null
@@ -97,15 +98,20 @@ try {
         Assert-Test (@($parseErrors).Count -eq 0) "PowerShell parses: $path $($parseErrors -join '; ')"
     }
 
-    foreach ($directory in @("tools", "unreal", "blender\scripts", "workflows", "profiles", "batches")) {
+    foreach ($directory in @("tools", "tools\internal", "unreal", "blender\scripts", "workflows", "profiles", "batches", "config")) {
         New-Item -ItemType Directory -Path (Join-Path $Sandbox $directory) -Force | Out-Null
     }
-    foreach ($path in @("tools\pipeline-common.ps1", "tools\run-image-to-3d.ps1", "tools\run-batch.ps1")) {
+    foreach ($path in @(
+        "tools\pipeline-common.ps1", "tools\run-image-to-3d.ps1", "tools\run-batch.ps1",
+        "tools\internal\AssetFactory.Batch.psm1", "tools\internal\AssetFactory.Pipeline.psm1", "tools\generate-image.ps1",
+        "tools\generate-asset-from-image.ps1", "tools\generate-asset-from-prompt.ps1"
+    )) {
         Copy-Item -LiteralPath (Join-Path $SourceRoot $path) -Destination (Join-Path $Sandbox $path)
     }
     Set-Content -LiteralPath (Join-Path $Sandbox "unreal\import_asset.py") -Value "# fixture"
     Set-Content -LiteralPath (Join-Path $Sandbox "blender\scripts\process-mesh.py") -Value "# fixture"
     Set-Content -LiteralPath (Join-Path $Sandbox "workflows\comfyui-flux-schnell-base.json") -Value "{}"
+    Copy-Item -LiteralPath (Join-Path $SourceRoot "config\reference-presets.json") -Destination (Join-Path $Sandbox "config\reference-presets.json")
     Set-Content -LiteralPath (Join-Path $Sandbox "Stub.uproject") -Value "{}"
     Set-Content -LiteralPath (Join-Path $Sandbox "source.png") -Value "mock PNG"
 
@@ -202,7 +208,12 @@ exit 0
 
     Reset-Calls
     $r = Invoke-TestPipeline "default"
-    Assert-Test ($r.Code -eq 0 -and $r.Metadata.engine -eq "triposr") "Le moteur par défaut reste TripoSR"
+    if ($r.Code -ne 0 -or $null -eq $r.Metadata -or $r.Metadata.engine -ne "triposr") {
+        Write-Host "[DIAG] default pipeline exit code: $($r.Code)"
+        Write-Host "[DIAG] default pipeline engine: $(if ($null -eq $r.Metadata) { '<no metadata>' } else { $r.Metadata.engine })"
+        foreach ($line in @($r.Output)) { Write-Host "[DIAG] $line" }
+    }
+    Assert-Test ($r.Code -eq 0 -and $null -ne $r.Metadata -and $r.Metadata.engine -eq "triposr") "Le moteur par défaut reste TripoSR"
     Assert-Test ($r.Metadata.importSourcePath.EndsWith("asset_default.fbx")) "TripoSR produit un FBX final nommé d'après l'asset"
     Assert-Test ($r.Metadata.geometry.status -eq "completed") "L'étape géométrique est enregistrée"
     Assert-Test ($r.Summary.generationRoot -match 'outputs[\\/]assets[\\/]asset_default[\\/]v001$') "La génération utilise outputs/assets/<AssetId>/v001"
@@ -255,26 +266,27 @@ exit 0
 
     Reset-Calls
     $batchPath = Join-Path $Sandbox "batches\images.json"
-    @{ batchId = "images"; assets = @(@{ id = "crate_a"; prompt = "crate" }, @{ id = "crate_b"; prompt = "crate" }) } |
-        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $batchPath -Encoding UTF8
-    & (Join-Path $Sandbox "tools\run-batch.ps1") -BatchPath $batchPath 6>&1 2>&1 | Out-Null
-    Assert-Test ($LASTEXITCODE -eq 0 -and ((@(Read-Calls).name -join ",") -eq "comfyui,comfyui")) "Un batch historique reste en mode images"
+    @{
+        kind = "asset-factory-batch"
+        schemaVersion = 1
+        batchId = "images"
+        entryPoint = "generate-image"
+        items = @(
+            @{ id = "crate_a"; prompt = "crate" },
+            @{ id = "crate_b"; prompt = "crate" }
+        )
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $batchPath -Encoding UTF8
+    & (Join-Path $Sandbox "tools\run-batch.ps1") -ManifestPath $batchPath -ValidateOnly 6>&1 2>&1 | Out-Null
+    Assert-Test ($LASTEXITCODE -eq 0) "Le nouveau manifest Batch V1 est valide"
+    Assert-Test (@(Read-Calls).Count -eq 0) "ValidateOnly ne lance aucun pipeline"
 
     Reset-Calls
-    $batchPath = Join-Path $Sandbox "batches\mixed.json"
-    @{ batchId = "mixed"; mode = "full"; engine = "trellis"; releaseComfyMemory = $false; assets = @(
-        @{ id = "crate_c"; prompt = "crate" }, @{ id = "crate_d"; prompt = "crate"; engine = "triposr" }
-    ) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $batchPath -Encoding UTF8
-    & (Join-Path $Sandbox "tools\run-batch.ps1") -BatchPath $batchPath -BlenderPath (Join-Path $Sandbox "tools\fake-blender.ps1") 6>&1 2>&1 | Out-Null
-    Assert-Test ($LASTEXITCODE -eq 0) "Un batch multi-moteurs réussit avec les simulations"
-    $engines = @(Read-Calls | Where-Object { $_.name -in @("trellis", "triposr") })
-    Assert-Test (($engines.name -join ",") -eq "trellis,triposr") "Le moteur de l'asset surcharge celui du batch"
-
-    Reset-Calls
-    & (Join-Path $Sandbox "tools\run-batch.ps1") -BatchPath $batchPath -Engine trellis -BlenderPath (Join-Path $Sandbox "tools\fake-blender.ps1") 6>&1 2>&1 | Out-Null
-    Assert-Test ($LASTEXITCODE -eq 0) "La surcharge du moteur en ligne de commande fonctionne"
-    $engines = @(Read-Calls | Where-Object { $_.name -in @("trellis", "triposr") })
-    Assert-Test (($engines.name -join ",") -eq "trellis,trellis") "La ligne de commande surcharge le manifeste et l'asset"
+    $legacyPath = Join-Path $Sandbox "batches\legacy.json"
+    @{ batchId = "legacy"; assets = @(@{ id = "crate"; prompt = "crate" }) } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $legacyPath -Encoding UTF8
+    & (Join-Path $Sandbox "tools\run-batch.ps1") -ManifestPath $legacyPath 6>&1 2>&1 | Out-Null
+    Assert-Test ($LASTEXITCODE -ne 0) "L ancien format batch est refuse explicitement"
+    Assert-Test (@(Read-Calls).Count -eq 0) "Un manifest historique invalide ne lance aucun pipeline"
 
     Write-Host "[OK] $script:Checks vérifications PowerShell réussies. Tous les moteurs externes étaient simulés."
 }

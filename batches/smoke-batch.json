@@ -1,17 +1,24 @@
 {
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
   "batchId": "smoke-batch",
-  "assets": [
+  "entryPoint": "generate-image",
+  "items": [
     {
       "id": "crate_a",
       "prompt": "small sci-fi cargo container, hard surface design, clean silhouette, neutral studio background",
-      "negativePrompt": "",
-      "seed": 1234
+      "params": {
+        "negativePrompt": "",
+        "seed": 1234
+      }
     },
     {
       "id": "crate_b",
       "prompt": "compact industrial sci-fi storage crate, reinforced corners, clean silhouette, neutral studio background",
-      "negativePrompt": "",
-      "seed": 5678
+      "params": {
+        "negativePrompt": "",
+        "seed": 5678
+      }
     }
   ]
 }

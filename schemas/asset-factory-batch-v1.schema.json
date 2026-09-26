@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "asset-factory-batch-v1.schema.json",
+  "title": "Asset Factory Batch Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "batchId", "entryPoint", "items"],
+  "properties": {
+    "kind": { "const": "asset-factory-batch" },
+    "schemaVersion": { "const": 1 },
+    "batchId": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "entryPoint": {
+      "enum": ["generate-image", "generate-asset-from-image", "generate-asset-from-prompt"]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "continueOnError": { "type": "boolean", "default": false },
+        "maxParallelism": { "const": 1, "default": 1 }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Parameters accepted by the selected public entry point. Runtime validation is derived from that script's declared parameters."
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "entryPoint": { "const": "generate-image" } } },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/promptItem" } } } }
+    },
+    {
+      "if": { "properties": { "entryPoint": { "const": "generate-asset-from-prompt" } } },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/promptItem" } } } }
+    },
+    {
+      "if": { "properties": { "entryPoint": { "const": "generate-asset-from-image" } } },
+      "then": { "properties": { "items": { "items": { "$ref": "#/$defs/imageItem" } } } }
+    }
+  ],
+  "$defs": {
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "seedStart": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "seedStep": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "seeds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
+        }
+      },
+      "not": {
+        "allOf": [
+          { "required": ["seeds"] },
+          { "anyOf": [{ "required": ["seedStart"] }, { "required": ["seedStep"] }] }
+        ]
+      }
+    },
+    "promptItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "prompt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "prompt": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" },
+        "outputs": { "$ref": "#/$defs/outputs" }
+      }
+    },
+    "imageItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "inputPath"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "inputPath": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" },
+        "outputs": { "$ref": "#/$defs/outputs" }
+      }
+    }
+  }
+}

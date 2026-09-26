@@ -1,0 +1,27 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "example_assets_from_images",
+  "entryPoint": "generate-asset-from-image",
+  "execution": {
+    "continueOnError": true,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "geometryMethod": "trellis",
+    "multiview": false,
+    "targetHeight": 1.0,
+    "autoImport": false
+  },
+  "items": [
+    {
+      "id": "barrel_example",
+      "inputPath": "../../docs/images/Barrel.png",
+      "outputs": {
+        "count": 2,
+        "seedStart": 3000,
+        "seedStep": 1
+      }
+    }
+  ]
+}

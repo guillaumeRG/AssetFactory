@@ -60,12 +60,15 @@ class PublicPipelineArchitectureTests(unittest.TestCase):
         self.assertFalse((ROOT / "tools/run-multiview-to-3d.ps1").exists())
 
     def test_batch_uses_public_entrypoints(self):
-        code = self.text("tools/run-batch.ps1")
+        runner = self.text("tools/run-batch.ps1")
+        code = self.text("tools/internal/AssetFactory.Batch.psm1")
         self.assertIn('"generate-image.ps1"', code)
         self.assertIn('"generate-asset-from-prompt.ps1"', code)
         self.assertIn('"generate-asset-from-image.ps1"', code)
-        self.assertNotIn('$PipelineRunner = Join-Path $PSScriptRoot "run-image-to-3d.ps1"', code)
-        self.assertIn('Multiview = $ActiveRecord.multiview', code)
+        for forbidden in ('run-image-to-3d.ps1', 'run-comfyui.ps1', 'run-trellis.ps1', 'run-triposr.ps1', 'import-unreal.ps1'):
+            self.assertNotIn(forbidden, runner)
+            self.assertNotIn(forbidden, code)
+        self.assertIn('Invoke-AFBatchManifest', runner)
         self.assertNotIn('MultiviewMethod', code)
 
     def test_reference_default_is_generic_not_multiview_specific(self):

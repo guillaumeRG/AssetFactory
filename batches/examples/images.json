@@ -1,0 +1,35 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "example_reference_images",
+  "description": "Generate several final images per prompt.",
+  "entryPoint": "generate-image",
+  "execution": {
+    "continueOnError": true,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "negativePrompt": "text, logo, watermark",
+    "candidates": 2,
+    "workflowPath": "../../workflows/comfyui-flux-schnell-base.json",
+    "releaseComfyMemory": true
+  },
+  "items": [
+    {
+      "id": "basalt_dark",
+      "prompt": "dark basalt rock, isolated object, detailed natural surface",
+      "outputs": {
+        "count": 3,
+        "seedStart": 1000,
+        "seedStep": 1
+      }
+    },
+    {
+      "id": "sandstone_layered",
+      "prompt": "layered sandstone rock, isolated object, geological sedimentary structure",
+      "outputs": {
+        "seeds": [2000, 2010]
+      }
+    }
+  ]
+}

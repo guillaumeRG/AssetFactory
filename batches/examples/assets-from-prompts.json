@@ -1,0 +1,33 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "example_assets_from_prompts",
+  "entryPoint": "generate-asset-from-prompt",
+  "execution": {
+    "continueOnError": true,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "negativePrompt": "environment, text, logo",
+    "candidates": 2,
+    "geometryMethod": "trellis",
+    "multiview": false,
+    "workflowPath": "../../workflows/comfyui-flux-schnell-base.json",
+    "releaseComfyMemory": true,
+    "autoImport": false
+  },
+  "items": [
+    {
+      "id": "tree_stylized",
+      "prompt": "A stylized tree, isolated single object, full object visible, centered composition, clean silhouette",
+      "params": {
+        "targetHeight": 8.0
+      },
+      "outputs": {
+        "count": 4,
+        "seedStart": 5000,
+        "seedStep": 1
+      }
+    }
+  ]
+}

@@ -48,11 +48,12 @@ class VisualQAStaticTests(unittest.TestCase):
         self.assertLess(multiview, qa)
         self.assertLess(qa, unreal)
 
-    def test_batch_forwards_postprocess_to_public_asset_entrypoints(self):
-        code = self.text("tools/run-batch.ps1")
-        self.assertIn('[string]$Postprocess = "none"', code)
-        self.assertIn('"postprocess" "Postprocess" "none"', code)
-        self.assertIn('Postprocess = $ActiveRecord.postprocess', code)
+    def test_batch_forwards_postprocess_through_dynamic_entrypoint_contract(self):
+        batch = self.text("tools/internal/AssetFactory.Batch.psm1")
+        for path in ("tools/generate-asset-from-image.ps1", "tools/generate-asset-from-prompt.ps1"):
+            self.assertIn('[string]$Postprocess = "none"', self.text(path))
+        self.assertIn('Get-AFBatchEntryPointContract', batch)
+        self.assertIn('$parameters[$parameter.PowerShellName] = $Execution.invocationParameters[$name]', batch)
 
     def test_configuration_is_versioned_and_keeps_qa_bounded(self):
         config = json.loads(self.text("config/postprocess.json"))

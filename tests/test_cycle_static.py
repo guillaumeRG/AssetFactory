@@ -15,18 +15,31 @@ class CycleStaticTests(unittest.TestCase):
         self.assertIn('[ValidateSet("triposr", "trellis")]', code)
         self.assertIn('[string]$Engine = "triposr"', code)
 
-    def test_batch_is_images_by_default(self):
-        code = self.text("tools/run-batch.ps1")
-        self.assertIn('[string]$Mode = "images"', code)
-        self.assertIn('"mode" "Mode" "images"', code)
+    def test_batch_uses_strict_v1_manifest(self):
+        runner = self.text("tools/run-batch.ps1")
+        module = self.text("tools/internal/AssetFactory.Batch.psm1")
+        self.assertIn('[string]$ManifestPath', runner)
+        self.assertIn('[switch]$Resume', runner)
+        self.assertIn('[switch]$ValidateOnly', runner)
+        self.assertNotIn('$BatchPath', runner)
+        self.assertIn('asset-factory-batch', module)
+        self.assertIn('schemaVersion', module)
         original = json.loads(self.text("batches/smoke-batch.json"))
-        self.assertNotIn("mode", original)
+        self.assertEqual(original["kind"], "asset-factory-batch")
+        self.assertEqual(original["schemaVersion"], 1)
+        self.assertEqual(original["entryPoint"], "generate-image")
 
-    def test_batch_choice_priority(self):
-        code = self.text("tools/run-batch.ps1")
-        helper = code.split('function Get-BatchSetting {', 1)[1].split('$BatchMetadata =', 1)[0]
-        self.assertLess(helper.index('$CommandOverrides.ContainsKey'), helper.index('$Asset.PSObject.Properties.Name'))
-        self.assertLess(helper.index('$Asset.PSObject.Properties.Name'), helper.index('Get-AFProperty $Batch'))
+    def test_batch_parameter_contract_is_derived_from_public_entrypoint(self):
+        code = self.text("tools/internal/AssetFactory.Batch.psm1")
+        self.assertIn('Get-AFBatchEntryPointContract', code)
+        self.assertIn('Parser]::ParseFile', code)
+        self.assertIn('Get-Command -Name $scriptPath -CommandType ExternalScript', code)
+        self.assertIn('Unknown parameter', code)
+
+
+    def test_cycle_contract_fixture_copies_pipeline_module(self):
+        code = self.text('tests/test-cycle-contracts.ps1')
+        self.assertIn('"tools\\internal\\AssetFactory.Pipeline.psm1"', code)
 
     def test_exactly_one_import_owned_by_pipeline(self):
         code = self.text("tools/run-image-to-3d.ps1")
@@ -130,17 +143,19 @@ class CycleStaticTests(unittest.TestCase):
 
     def test_example_full_manifest_is_generic(self):
         data = json.loads(self.text('batches/smoke-batch-3d.json'))
-        self.assertEqual(data['mode'], 'full')
-        self.assertEqual(data['engine'], 'trellis')
-        self.assertEqual(data['projectProfile'], '')
-        self.assertFalse(data['autoImport'])
-        self.assertEqual(len(data['assets']), 1)
+        self.assertEqual(data['kind'], 'asset-factory-batch')
+        self.assertEqual(data['schemaVersion'], 1)
+        self.assertEqual(data['entryPoint'], 'generate-asset-from-prompt')
+        self.assertEqual(data['defaults']['geometryMethod'], 'trellis')
+        self.assertEqual(data['defaults']['projectProfile'], '')
+        self.assertFalse(data['defaults']['autoImport'])
+        self.assertEqual(len(data['items']), 1)
 
     def test_batch_output_only_references_generations(self):
-        code = self.text('tools/run-batch.ps1')
-        self.assertIn('"outputs\\batches\\$BatchId\\$BatchRunId"', code)
+        code = self.text('tools/internal/AssetFactory.Batch.psm1')
+        self.assertIn('outputs\\batches\\', code)
         self.assertIn('generationRoot = $null', code)
-        self.assertNotIn('assets\\$($ActiveRecord.id)', code)
+        self.assertNotIn('outputs\\assets\\', code)
 
     def test_setup_uses_canonical_test_and_diagnostic_folders(self):
         code = self.text('setup-asset-factory.ps1')
@@ -196,3 +211,9 @@ class CycleStaticTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_cycle_fixture_copies_reference_preset_registry_required_by_real_image_stage():
+    cycle = (ROOT / "tests" / "test-cycle-contracts.ps1").read_text(encoding="utf-8-sig")
+    assert '"config\\reference-presets.json"' in cycle
+    assert 'Copy-Item -LiteralPath (Join-Path $SourceRoot "config\\reference-presets.json")' in cycle
