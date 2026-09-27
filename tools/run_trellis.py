@@ -219,24 +219,22 @@ def _run(args: argparse.Namespace) -> int:
         )
 
     if args.geometry_only:
-        import math
         import trimesh
 
         mesh = outputs["mesh"][0]
         vertices = mesh.vertices.detach().cpu().numpy()
         faces = mesh.faces.detach().cpu().numpy()
-
-        vertices, faces = postprocessing_utils.postprocess_mesh(
-            vertices,
-            faces,
-            simplify=args.simplify > 0,
-            simplify_ratio=args.simplify,
-            fill_holes=True,
-            fill_holes_max_hole_size=0.04,
-            fill_holes_max_hole_nbe=int(250 * math.sqrt(1.0 - args.simplify)),
-            fill_holes_resolution=1024,
-            fill_holes_num_views=1000,
-            verbose=True,
+        raw_vertices = int(vertices.shape[0])
+        raw_faces = int(faces.shape[0])
+        if args.simplify > 0:
+            print(
+                f"[WARN] --simplify={args.simplify} ignore : Asset Factory est en mode qualite maximale ; "
+                "aucune decimation n'est appliquee."
+            )
+        print(
+            f"[INFO] Geometrie TRELLIS brute conservee : {raw_vertices} vertices, "
+            f"{raw_faces} faces. Aucune decimation, suppression de faces invisibles "
+            "ou reconstruction automatique du mesh."
         )
         # TRELLIS mesh coordinates are Z-up, while glTF assets are Y-up.
         # trimesh writes the supplied coordinates directly and does not add the
@@ -254,10 +252,16 @@ def _run(args: argparse.Namespace) -> int:
         geometry.export(str(output_glb))
         print("[INFO] Export géométrie seule : axe glTF Y-up appliqué ; UV/rendu/bake TRELLIS ignorés.")
     else:
+        if args.simplify > 0:
+            print(
+                f"[WARN] --simplify={args.simplify} ignore : Asset Factory est en mode qualite maximale ; "
+                "aucune decimation n'est appliquee."
+            )
         glb = postprocessing_utils.to_glb(
             outputs["gaussian"][0],
             outputs["mesh"][0],
-            simplify=args.simplify,
+            simplify=0.0,
+            fill_holes=False,
             texture_size=args.texture_size,
         )
         glb.export(str(output_glb))
@@ -295,7 +299,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--models-dir", type=Path, default=default_models_dir())
     parser.add_argument("--check-models", action="store_true")
-    parser.add_argument("--simplify", type=float, default=0.95)
+    parser.add_argument("--simplify", type=float, default=0.0, help="Compatibilite uniquement : la simplification de geometrie est desactivee en mode qualite maximale.")
     parser.add_argument("--texture-size", type=int, default=1024)
     parser.add_argument("--geometry-only", action="store_true")
     parser.add_argument("--save-ply", action="store_true")

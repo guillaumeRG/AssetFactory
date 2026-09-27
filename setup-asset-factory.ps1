@@ -157,6 +157,13 @@ $MultiViewAddonSmoke = Join-Path $ProjectRoot "tools\internal\multiview_addon_sm
 $MultiViewCheckpoint = Join-Path $ComfyUiRoot "models\checkpoints\RealVisXL_V5.0_fp16.safetensors"
 $MultiViewDepthModel = Join-Path $ComfyUiRoot "models\controlnet\controlnet_depth_sdxl.safetensors"
 $MultiViewLightningLora = Join-Path $ComfyUiRoot "models\loras\sdxl_lightning_8step_lora.safetensors"
+# StableGen's official DEFAULT (MESH + TEXTURE) consistency path uses
+# ComfyUI_IPAdapter_plus with the SDXL ViT-H model and CLIP Vision ViT-H.
+$MultiViewIpAdapterRepoUrl = "https://github.com/cubiq/ComfyUI_IPAdapter_plus.git"
+$MultiViewIpAdapterPinnedCommit = "a0f451a5113cf9becb0847b92884cb10cbdec0ef"
+$MultiViewIpAdapterRoot = Join-Path $ComfyUiRoot "custom_nodes\ComfyUI_IPAdapter_plus"
+$MultiViewIpAdapterModel = Join-Path $ComfyUiRoot "models\ipadapter\ip-adapter-plus_sdxl_vit-h.safetensors"
+$MultiViewClipVisionModel = Join-Path $ComfyUiRoot "models\clip_vision\CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
 
 function Write-Header {
     param([Parameter(Mandatory)][string]$Title)
@@ -4963,6 +4970,44 @@ function Invoke-ComfyUiCommand {
 }
 
 
+function Move-ManagedDependencyLegacyAside {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$BackupBaseName,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $null }
+
+    $parent = Split-Path -Parent $Path
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $candidate = Join-Path $parent ("{0}.unmanaged-backup-{1}" -f $BackupBaseName, $stamp)
+    $suffix = 1
+    while (Test-Path -LiteralPath $candidate) {
+        $candidate = Join-Path $parent ("{0}.unmanaged-backup-{1}-{2}" -f $BackupBaseName, $stamp, $suffix)
+        $suffix++
+    }
+
+    Move-Item -LiteralPath $Path -Destination $candidate
+    Write-Result "WARN" "$Label unmanaged copy preserved at $candidate"
+    return $candidate
+}
+
+function Restore-ManagedDependencyLegacy {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$BackupPath,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BackupPath) -or -not (Test-Path -LiteralPath $BackupPath -PathType Container)) { return }
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Move-Item -LiteralPath $BackupPath -Destination $Path
+    Write-Result "WARN" "$Label previous unmanaged copy restored after install failure."
+}
+
 function Test-MultiViewRepository {
     if (-not (Test-Path -LiteralPath $MultiViewRepoRoot -PathType Container)) {
         return [pscustomobject]@{ Valid = $false; State = "missing"; Origin = $null; Message = "vendor\\StableGen does not exist" }
@@ -5018,14 +5063,41 @@ function Ensure-MultiViewRepository {
         if ($clone.ExitCode -ne 0) { throw "Could not clone StableGen: $($clone.Output -join ' | ')" }
         $state = Test-MultiViewRepository
     } elseif ($state.State -eq "partial") {
+        if ($NoInstall) {
+            throw "vendor\\StableGen is an unmanaged copy and -NoInstall is active."
+        }
+
         $entries = @(Get-ChildItem -LiteralPath $MultiViewRepoRoot -Force -ErrorAction SilentlyContinue)
-        if ($entries.Count -eq 0 -and -not $NoInstall) {
+        if ($entries.Count -eq 0) {
             Remove-Item -LiteralPath $MultiViewRepoRoot -Force
             $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $MultiViewRepoUrl, $MultiViewRepoRoot)
             if ($clone.ExitCode -ne 0) { throw "Could not clone StableGen: $($clone.Output -join ' | ')" }
             $state = Test-MultiViewRepository
         } else {
-            throw "vendor\\StableGen is not the managed Git repository. Nothing was deleted."
+            # Older Asset Factory installs could contain a complete StableGen source
+            # snapshot without .git metadata. Preserve it before migrating to the
+            # exact managed/pinned checkout required by the current integration.
+            $looksLikeStableGen = (
+                (Test-Path -LiteralPath (Join-Path $MultiViewRepoRoot "stablegen\\__init__.py") -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $MultiViewRepoRoot "stablegen\\core\\__init__.py") -PathType Leaf)
+            )
+            if (-not $looksLikeStableGen) {
+                throw "vendor\\StableGen exists without Git metadata and is not recognizable as a StableGen source tree. Nothing was modified."
+            }
+
+            $legacyBackup = Move-ManagedDependencyLegacyAside -Path $MultiViewRepoRoot -BackupBaseName "StableGen" -Label "StableGen"
+            try {
+                Write-Result "INFO" "Migrating legacy StableGen snapshot to managed official checkout..."
+                $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $MultiViewRepoUrl, $MultiViewRepoRoot)
+                if ($clone.ExitCode -ne 0) { throw "Could not clone StableGen: $($clone.Output -join ' | ')" }
+                $state = Test-MultiViewRepository
+                if (-not $state.Valid) {
+                    throw "Cloned StableGen repository is invalid: $($state.Message)"
+                }
+            } catch {
+                Restore-ManagedDependencyLegacy -Path $MultiViewRepoRoot -BackupPath $legacyBackup -Label "StableGen"
+                throw
+            }
         }
     }
     if (-not $state.Valid) {
@@ -5047,6 +5119,90 @@ function Ensure-MultiViewRepository {
     $gitState = Get-MultiViewGitState
     if ($gitState.Head -ne $MultiViewPinnedCommit) { throw "StableGen HEAD is not the validated pin $MultiViewPinnedCommit." }
     Write-Result "OK" "StableGen pinned to $MultiViewPinnedCommit"
+}
+
+function Ensure-MultiViewIpAdapterNode {
+    $git = Get-GitInfo
+    if (-not $git.Installed) { throw "Git is required before preparing ComfyUI IPAdapter Plus." }
+
+    $parent = Split-Path -Parent $MultiViewIpAdapterRoot
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $MultiViewIpAdapterRoot -PathType Container)) {
+        if ($NoInstall) { throw "ComfyUI IPAdapter Plus is missing and -NoInstall is active." }
+        Write-Result "INFO" "Cloning ComfyUI IPAdapter Plus for StableGen source-image consistency..."
+        $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $MultiViewIpAdapterRepoUrl, $MultiViewIpAdapterRoot)
+        if ($clone.ExitCode -ne 0) { throw "Could not clone ComfyUI IPAdapter Plus: $($clone.Output -join ' | ')" }
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $MultiViewIpAdapterRoot ".git") -PathType Container)) {
+        if ($NoInstall) {
+            throw "ComfyUI_IPAdapter_plus is an unmanaged copy and -NoInstall is active."
+        }
+
+        $looksLikeIpAdapter = (
+            (Test-Path -LiteralPath (Join-Path $MultiViewIpAdapterRoot "IPAdapterPlus.py") -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $MultiViewIpAdapterRoot "__init__.py") -PathType Leaf)
+        )
+        if (-not $looksLikeIpAdapter) {
+            throw "ComfyUI_IPAdapter_plus exists without Git metadata and is not recognizable as the official custom node. Nothing was modified."
+        }
+
+        $legacyBackup = Move-ManagedDependencyLegacyAside -Path $MultiViewIpAdapterRoot -BackupBaseName "ComfyUI_IPAdapter_plus" -Label "ComfyUI IPAdapter Plus"
+        try {
+            Write-Result "INFO" "Migrating legacy ComfyUI IPAdapter Plus snapshot to managed official checkout..."
+            $clone = Invoke-NativeCapture -Executable $git.Path -Arguments @("clone", $MultiViewIpAdapterRepoUrl, $MultiViewIpAdapterRoot)
+            if ($clone.ExitCode -ne 0) { throw "Could not clone ComfyUI IPAdapter Plus: $($clone.Output -join ' | ')" }
+        } catch {
+            Restore-ManagedDependencyLegacy -Path $MultiViewIpAdapterRoot -BackupPath $legacyBackup -Label "ComfyUI IPAdapter Plus"
+            throw
+        }
+    }
+
+    $originProbe = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewIpAdapterRoot, "remote", "get-url", "origin")
+    if ($originProbe.ExitCode -ne 0 -or $originProbe.Output.Count -eq 0) {
+        throw "Could not read ComfyUI IPAdapter Plus origin."
+    }
+    $origin = $originProbe.Output[0].ToString().Trim()
+    if ((Normalize-GitRemoteUrl $origin) -ne (Normalize-GitRemoteUrl $MultiViewIpAdapterRepoUrl)) {
+        throw "ComfyUI_IPAdapter_plus has unexpected origin '$origin'. Nothing was modified."
+    }
+
+    $dirty = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewIpAdapterRoot, "status", "--porcelain", "--untracked-files=no")
+    if ($dirty.ExitCode -ne 0 -or $dirty.Output.Count -gt 0) {
+        throw "ComfyUI_IPAdapter_plus tracked files contain local changes. Refusing to overwrite them."
+    }
+
+    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewIpAdapterRoot, "rev-parse", "HEAD")
+    $current = if ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0) { $head.Output[0].ToString().Trim() } else { $null }
+    if ($current -ne $MultiViewIpAdapterPinnedCommit) {
+        if ($NoInstall) { throw "ComfyUI IPAdapter Plus is not pinned to $MultiViewIpAdapterPinnedCommit and -NoInstall is active." }
+        Write-Result "INFO" "Pinning ComfyUI IPAdapter Plus to validated revision..."
+        $fetch = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewIpAdapterRoot, "fetch", "origin", $MultiViewIpAdapterPinnedCommit)
+        if ($fetch.ExitCode -ne 0) { throw "Could not fetch ComfyUI IPAdapter Plus pin: $($fetch.Output -join ' | ')" }
+        $checkout = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewIpAdapterRoot, "checkout", "--detach", $MultiViewIpAdapterPinnedCommit)
+        if ($checkout.ExitCode -ne 0) { throw "Could not checkout ComfyUI IPAdapter Plus pin: $($checkout.Output -join ' | ')" }
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $MultiViewIpAdapterRoot "IPAdapterPlus.py") -PathType Leaf)) {
+        throw "ComfyUI IPAdapter Plus installation is incomplete."
+    }
+    Write-Result "OK" "ComfyUI IPAdapter Plus pinned to $MultiViewIpAdapterPinnedCommit"
+}
+
+function Test-MultiViewIpAdapterNode {
+    if (-not (Test-Path -LiteralPath (Join-Path $MultiViewIpAdapterRoot "IPAdapterPlus.py") -PathType Leaf)) {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $MultiViewIpAdapterRoot ".git") -PathType Container)) {
+        return $false
+    }
+    $git = Get-GitInfo
+    if (-not $git.Installed) { return $false }
+    $head = Invoke-NativeCapture -Executable $git.Path -Arguments @("-C", $MultiViewIpAdapterRoot, "rev-parse", "HEAD")
+    return ($head.ExitCode -eq 0 -and $head.Output.Count -gt 0 -and $head.Output[0].ToString().Trim() -eq $MultiViewIpAdapterPinnedCommit)
 }
 
 function Get-MultiViewBlenderPython {
@@ -5233,6 +5389,16 @@ function Ensure-MultiViewModels {
         -Uri "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors?download=true" `
         -Destination $MultiViewCheckpoint `
         -Label "RealVisXL V5.0 fp16"
+
+    Ensure-MultiViewFile `
+        -Uri "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors?download=true" `
+        -Destination $MultiViewIpAdapterModel `
+        -Label "IPAdapter Plus SDXL ViT-H"
+
+    Ensure-MultiViewFile `
+        -Uri "https://huggingface.co/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors" `
+        -Destination $MultiViewClipVisionModel `
+        -Label "IPAdapter CLIP Vision ViT-H"
 }
 
 function Test-MultiViewModelFiles {
@@ -5240,7 +5406,9 @@ function Test-MultiViewModelFiles {
     foreach ($item in @(
         @{ Path = $MultiViewCheckpoint; Label = "RealVisXL V5.0 fp16" },
         @{ Path = $MultiViewDepthModel; Label = "Depth ControlNet SDXL" },
-        @{ Path = $MultiViewLightningLora; Label = "SDXL Lightning 8-step LoRA" }
+        @{ Path = $MultiViewLightningLora; Label = "SDXL Lightning 8-step LoRA" },
+        @{ Path = $MultiViewIpAdapterModel; Label = "IPAdapter Plus SDXL ViT-H" },
+        @{ Path = $MultiViewClipVisionModel; Label = "IPAdapter CLIP Vision ViT-H" }
     )) {
         if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf) -or
             (Get-Item -LiteralPath $item.Path).Length -lt 10MB) {
@@ -5273,6 +5441,11 @@ function Show-MultiViewStatus {
     } else {
         Write-Result "MISSING" "ComfyUI incomplet"
     }
+    if (Test-MultiViewIpAdapterNode) {
+        Write-Result "OK" "ComfyUI IPAdapter Plus prêt"
+    } else {
+        Write-Result "MISSING" "ComfyUI IPAdapter Plus absent ou mauvaise révision"
+    }
     $blender = Get-BlenderInfo
     if ($blender.Installed) { Write-Result "OK" "Blender : $($blender.Path)" }
     else { Write-Result "MISSING" "Blender" }
@@ -5300,6 +5473,10 @@ function Invoke-MultiViewDoctor {
         (-not (Test-Path -LiteralPath $ComfyUiMain -PathType Leaf))) {
         Write-Result "FAIL" "ComfyUI incomplet"; $failures++
     } else { Write-Result "OK" "ComfyUI disponible" }
+
+    if (-not (Test-MultiViewIpAdapterNode)) {
+        Write-Result "FAIL" "ComfyUI IPAdapter Plus absent ou mauvaise révision"; $failures++
+    } else { Write-Result "OK" "ComfyUI IPAdapter Plus prêt" }
 
     $missing = @(Test-MultiViewModelFiles)
     if ($missing.Count -gt 0) {
@@ -5348,6 +5525,7 @@ function Invoke-MultiViewInstall {
     }
 
     Ensure-MultiViewBlenderDependencies
+    Ensure-MultiViewIpAdapterNode
     Ensure-MultiViewModels
 
     $doctorOutput = @(Invoke-MultiViewDoctor)

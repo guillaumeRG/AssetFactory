@@ -30,7 +30,7 @@ param(
     [System.Nullable[bool]]$AutoImport = $null,
 
     [ValidateRange(0.0, 0.99)]
-    [double]$TrellisSimplify = 0.95,
+    [double]$TrellisSimplify = 0.0,
     [ValidateSet(512, 1024, 2048)]
     [int]$TrellisTextureSize = 1024,
 

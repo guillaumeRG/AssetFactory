@@ -30,7 +30,7 @@ class OutputNameTests(unittest.TestCase):
             output_dir = root / 'outputs' / 'unique-job'
             args = SimpleNamespace(
                 input=[str(input_path)], asset_id='', output_dir=str(output_dir),
-                models_dir=root / 'models', seed=1, simplify=0.95,
+                models_dir=root / 'models', seed=1, simplify=0.0,
                 texture_size=1024, save_ply=save_ply, multi_image_mode='stochastic',
                 geometry_only=False,
             )

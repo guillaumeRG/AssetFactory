@@ -13,9 +13,11 @@
     "candidates": 4,
     "geometryMethod": "trellis",
     "multiview": true,
-    "multiviewCameras": 8,
+    "multiviewCameras": 10,
     "textureResolution": 2048,
-    "autoImport": false,
+    "projectProfile": "../profiles/nullon.json",
+    "category": "Props",
+    "autoImport": true,
     "postprocess": "none"
   },
   "items": [

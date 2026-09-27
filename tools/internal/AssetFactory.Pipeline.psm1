@@ -403,7 +403,7 @@ function Invoke-AFAssetPipeline {
         [string]$ProjectProfile = "",
         [string]$Category = "",
         [System.Nullable[bool]]$AutoImport = $null,
-        [ValidateRange(0.0, 0.99)][double]$TrellisSimplify = 0.95,
+        [ValidateRange(0.0, 0.99)][double]$TrellisSimplify = 0.0,
         [ValidateSet(512, 1024, 2048)][int]$TrellisTextureSize = 1024,
         [string]$WorkflowPath = "workflows\comfyui-flux-schnell-base.json",
         [string]$ServerUrl = "http://127.0.0.1:8188",

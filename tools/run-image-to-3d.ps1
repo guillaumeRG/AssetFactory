@@ -47,7 +47,7 @@ param(
     [bool]$ReleaseComfyMemory = $true,
 
     [ValidateRange(0.0, 0.99)]
-    [double]$TrellisSimplify = 0.95,
+    [double]$TrellisSimplify = 0.0,
     [ValidateSet(512, 1024, 2048)]
     [int]$TrellisTextureSize = 1024,
 
@@ -65,6 +65,14 @@ $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptR
 Import-Module (Join-Path $PSScriptRoot "internal\AssetFactory.Pipeline.psm1") -Force
 
 $ScriptBoundParameters = $PSBoundParameters
+
+# Quality-first invariant: never remove TRELLIS geometry for performance.
+# The parameter remains accepted for backward compatibility with older batch
+# manifests, but it is intentionally ignored.
+if ($TrellisSimplify -ne 0.0) {
+    Write-Warning "TrellisSimplify=$TrellisSimplify est ignore : Asset Factory conserve le mesh TRELLIS brut."
+    $TrellisSimplify = 0.0
+}
 
 $Engine = $Engine.ToLowerInvariant()
 if ($Mode -eq "multiview" -and $Engine -ne "trellis") { throw "Le mode multi-vues nécessite TRELLIS." }
@@ -111,6 +119,7 @@ function Assert-StageSuccess {
 function Invoke-AFIntegratedMultiview {
     param(
         [Parameter(Mandatory)][string]$MeshPath,
+        [Parameter(Mandatory)][string]$ReferenceImagePath,
         [Parameter(Mandatory)][string]$PromptText,
         [string]$NegativePromptText = "",
         [Parameter(Mandatory)][string]$BlenderExecutable,
@@ -155,6 +164,7 @@ function Invoke-AFIntegratedMultiview {
 
     [ordered]@{
         mesh = $MeshPath
+        source_image = $ReferenceImagePath
         asset_name = $AssetName
         run_root = $runRoot
         python_deps = $depsRoot
@@ -635,6 +645,7 @@ try {
 
             $multiviewResult = Invoke-AFIntegratedMultiview `
                 -MeshPath $ProcessedMeshPath `
+                -ReferenceImagePath $ImagePath `
                 -PromptText $textureText `
                 -NegativePromptText $TextureNegativePrompt `
                 -BlenderExecutable $BlenderExe `

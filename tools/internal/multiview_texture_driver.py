@@ -12,6 +12,7 @@ import importlib
 import json
 import math
 import re
+import struct
 import sys
 import time
 import traceback
@@ -32,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     cli = parser.parse_args(_argv())
     config_path = Path(cli.config).resolve()
     data = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    required = ("mesh", "run_root", "python_deps")
+    required = ("mesh", "source_image", "run_root", "python_deps")
     missing = [k for k in required if not data.get(k)]
     if missing:
         raise RuntimeError("Missing launch config field(s): " + ", ".join(missing))
@@ -355,9 +356,20 @@ def configure_stablegen() -> None:
     checkpoints = get_json("/models/checkpoints")
     loras = get_json("/models/loras")
     controlnets = get_json("/models/controlnet")
+    try:
+        ipadapter_models = get_json("/models/ipadapter")
+        clip_vision_models = get_json("/models/clip_vision")
+        ipadapter_node_info = get_json("/object_info/IPAdapterUnifiedLoader")
+    except Exception as exc:
+        raise RuntimeError(
+            "StableGen official source-image consistency requires ComfyUI "
+            "IPAdapter Plus. Run '.\\setup-asset-factory.ps1 multiview install'."
+        ) from exc
 
     required_lora = "sdxl_lightning_8step_lora.safetensors"
     required_cn = "controlnet_depth_sdxl.safetensors"
+    required_ipadapter = "ip-adapter-plus_sdxl_vit-h.safetensors"
+    required_clip_vision = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
     missing = []
     if ARGS.checkpoint not in checkpoints:
         missing.append(f"checkpoint:{ARGS.checkpoint}")
@@ -365,8 +377,21 @@ def configure_stablegen() -> None:
         missing.append(f"lora:{required_lora}")
     if required_cn not in controlnets:
         missing.append(f"controlnet:{required_cn}")
+    if required_ipadapter not in ipadapter_models:
+        missing.append(f"ipadapter:{required_ipadapter}")
+    if required_clip_vision not in clip_vision_models:
+        missing.append(f"clip_vision:{required_clip_vision}")
+    if (
+        not isinstance(ipadapter_node_info, dict)
+        or "IPAdapterUnifiedLoader" not in ipadapter_node_info
+    ):
+        missing.append("custom-node:IPAdapterUnifiedLoader")
     if missing:
-        raise RuntimeError("Missing ComfyUI model(s): " + ", ".join(missing))
+        raise RuntimeError(
+            "Missing StableGen official consistency dependency/dependencies: "
+            + ", ".join(missing)
+            + ". Run '.\\setup-asset-factory.ps1 multiview install'."
+        )
 
     state._cached_checkpoint_list = [
         (n, n, f"Checkpoint: {n}") for n in sorted(checkpoints)
@@ -380,13 +405,26 @@ def configure_stablegen() -> None:
         item.name = name
         item.supports_depth = name == required_cn
 
+    source_image = Path(ARGS.source_image).resolve()
+    if not source_image.is_file():
+        raise RuntimeError(f"Source reference image does not exist: {source_image}")
+
     scene = bpy.context.scene
-    scene.stablegen_preset = "DEFAULT"
+    # Match StableGen's official TRELLIS.2 -> texture path instead of the generic
+    # existing-mesh DEFAULT preset. This preset keeps the original generation
+    # image as an IPAdapter style reference for every sequential camera.
+    scene.stablegen_preset = "DEFAULT (MESH + TEXTURE)"
     result = bpy.ops.stablegen.apply_preset()
     if "CANCELLED" in result:
-        raise RuntimeError("multiview DEFAULT preset could not be applied.")
+        raise RuntimeError(
+            "StableGen DEFAULT (MESH + TEXTURE) preset could not be applied."
+        )
 
-    # Keep multiview's stock DEFAULT preset intact and only supply job inputs.
+    # Asset Factory currently supplies a TRELLIS v1/imported mesh, but StableGen's
+    # official high-consistency preset expects the TRELLIS.2 source image through
+    # trellis2_last_input_image. Populate the exact vendor handoff so the official
+    # sequential IPAdapter path uses Asset Factory's original reference image.
+    scene.trellis2_last_input_image = str(source_image)
     scene.model_name = ARGS.checkpoint
     scene.sg_model_name_backup = ARGS.checkpoint
     scene.comfyui_prompt = ARGS.prompt
@@ -406,11 +444,17 @@ def configure_stablegen() -> None:
             f"multiview DEFAULT generation method changed unexpectedly: "
             f"{scene.generation_method}"
         )
-    if bool(scene.sequential_ipadapter):
+    if not bool(scene.sequential_ipadapter):
         raise RuntimeError(
-            "multiview DEFAULT unexpectedly requires sequential IPAdapter "
-            "in this vendor revision."
+            "StableGen DEFAULT (MESH + TEXTURE) did not enable sequential IPAdapter."
         )
+    if scene.sequential_ipadapter_mode != "trellis2_input":
+        raise RuntimeError(
+            "StableGen DEFAULT (MESH + TEXTURE) is not using the source image "
+            f"as its sequential IPAdapter reference: {scene.sequential_ipadapter_mode!r}"
+        )
+    if Path(bpy.path.abspath(scene.trellis2_last_input_image)).resolve() != source_image:
+        raise RuntimeError("StableGen source-image IPAdapter handoff was not preserved.")
     if (
         len(scene.controlnet_units) != 1
         or scene.controlnet_units[0].unit_type != "depth"
@@ -423,8 +467,15 @@ def configure_stablegen() -> None:
         or scene.lora_units[0].model_name != required_lora
     ):
         raise RuntimeError(
-            "multiview DEFAULT did not configure the expected SDXL Lightning LoRA."
+            "StableGen DEFAULT (MESH + TEXTURE) did not configure the expected "
+            "SDXL Lightning LoRA."
         )
+
+    log(
+        "StableGen official consistency path enabled: source image -> IPAdapter "
+        f"(style, strength={scene.ipadapter_strength:.2f}) + Depth ControlNet "
+        f"for every sequential camera. Reference: {source_image}"
+    )
 
 
 def create_cameras(targets):
@@ -438,10 +489,10 @@ def create_cameras(targets):
             num_cameras=ARGS.num_cameras,
             purge_others=True,
             auto_aspect="per_camera",
-            exclude_bottom=True,
+            exclude_bottom=False,
             review_placement=False,
             occlusion_mode="none",
-            auto_prompts=False,
+            auto_prompts=True,
         )
     if "CANCELLED" in result:
         raise RuntimeError("camera placement cancelled.")
@@ -522,6 +573,107 @@ def _uv_pair_close(left, right, epsilon: float = 1e-5) -> bool:
     )
 
 
+def _triangle_uv_area(a, b, c) -> float:
+    return abs(
+        (float(b[0]) - float(a[0])) * (float(c[1]) - float(a[1]))
+        - (float(c[0]) - float(a[0])) * (float(b[1]) - float(a[1]))
+    ) * 0.5
+
+
+def _estimate_uv_fill_ratio(obj, uv_name: str) -> float:
+    """Estimate how much of the 0..1 atlas is occupied by actual UV faces.
+
+    This is not pixel-perfect packing coverage (it ignores padding between
+    islands) but it is a useful comparative signal when choosing between
+    unwrap strategies. Higher is generally better as long as the unwrap is
+    still valid and non-overlapping.
+    """
+    mesh = obj.data
+    layer = mesh.uv_layers.get(uv_name)
+    if layer is None:
+        raise RuntimeError(f"UV map {uv_name!r} is missing on {obj.name}")
+
+    total_area = 0.0
+    for poly in mesh.polygons:
+        loop_indices = list(poly.loop_indices)
+        if len(loop_indices) < 3:
+            continue
+        base = layer.data[loop_indices[0]].uv
+        for offset in range(1, len(loop_indices) - 1):
+            left = layer.data[loop_indices[offset]].uv
+            right = layer.data[loop_indices[offset + 1]].uv
+            total_area += _triangle_uv_area(base, left, right)
+    return total_area
+
+
+def _percentile(sorted_values: list[float], fraction: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = max(0.0, min(1.0, fraction)) * (len(sorted_values) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return sorted_values[lower]
+    weight = position - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
+def _estimate_uv_distortion(obj, uv_name: str) -> dict:
+    """Measure variation in texel density across the atlas.
+
+    A very small number of giant islands can look attractive if we only count
+    islands, while actually stretching some faces over huge UV distances and
+    crushing others.  We therefore compare UV triangle area to 3D triangle
+    area.  The absolute ratio is irrelevant; what matters is how much the
+    log2 density varies between faces.
+    """
+    mesh = obj.data
+    layer = mesh.uv_layers.get(uv_name)
+    if layer is None:
+        raise RuntimeError(f"UV map {uv_name!r} is missing on {obj.name}")
+
+    log_densities: list[float] = []
+    for poly in mesh.polygons:
+        loop_indices = list(poly.loop_indices)
+        if len(loop_indices) < 3:
+            continue
+        base_loop = loop_indices[0]
+        base_uv = layer.data[base_loop].uv
+        base_co = mesh.vertices[mesh.loops[base_loop].vertex_index].co
+        for offset in range(1, len(loop_indices) - 1):
+            left_loop = loop_indices[offset]
+            right_loop = loop_indices[offset + 1]
+            left_uv = layer.data[left_loop].uv
+            right_uv = layer.data[right_loop].uv
+            left_co = mesh.vertices[mesh.loops[left_loop].vertex_index].co
+            right_co = mesh.vertices[mesh.loops[right_loop].vertex_index].co
+
+            uv_area = _triangle_uv_area(base_uv, left_uv, right_uv)
+            area_3d = ((left_co - base_co).cross(right_co - base_co)).length * 0.5
+            if uv_area <= 1e-14 or area_3d <= 1e-14:
+                continue
+            density = uv_area / area_3d
+            log_densities.append(math.log(density, 2.0))
+
+    if not log_densities:
+        return {
+            "density_spread_p95_p05": 999.0,
+            "density_spread_iqr": 999.0,
+        }
+
+    log_densities.sort()
+    p05 = _percentile(log_densities, 0.05)
+    p25 = _percentile(log_densities, 0.25)
+    p75 = _percentile(log_densities, 0.75)
+    p95 = _percentile(log_densities, 0.95)
+    return {
+        "density_spread_p95_p05": p95 - p05,
+        "density_spread_iqr": p75 - p25,
+    }
+
+
 def _analyze_uv_islands(obj, uv_name: str) -> dict:
     """Count UV islands using mesh-edge continuity, without changing the mesh."""
     mesh = obj.data
@@ -537,6 +689,9 @@ def _analyze_uv_islands(obj, uv_name: str) -> dict:
             "single_face_island_count": 0,
             "island_ratio": 0.0,
             "single_face_ratio": 0.0,
+            "estimated_fill_ratio": 0.0,
+            "density_spread_p95_p05": 0.0,
+            "density_spread_iqr": 0.0,
         }
 
     parent = list(range(face_count))
@@ -601,6 +756,8 @@ def _analyze_uv_islands(obj, uv_name: str) -> dict:
         "single_face_island_count": single_face_islands,
         "island_ratio": island_count / face_count,
         "single_face_ratio": single_face_islands / face_count,
+        "estimated_fill_ratio": _estimate_uv_fill_ratio(obj, uv_name),
+        **_estimate_uv_distortion(obj, uv_name),
     }
 
 
@@ -623,6 +780,115 @@ def _mesh_topology_report(obj) -> dict:
         }
     finally:
         bm.free()
+
+
+def _create_fresh_bake_uv_layer(obj):
+    existing = obj.data.uv_layers.get("BakeUV")
+    if existing is not None:
+        obj.data.uv_layers.remove(existing)
+
+    layer = obj.data.uv_layers.new(name="BakeUV")
+    obj.data.uv_layers.active = layer
+    try:
+        layer.active_render = True
+    except Exception:
+        pass
+    return layer
+
+
+def _capture_uv_layer(obj, uv_name: str) -> list[tuple[float, float]]:
+    layer = obj.data.uv_layers.get(uv_name)
+    if layer is None:
+        raise RuntimeError(f"UV map {uv_name!r} is missing on {obj.name}")
+    return [(float(item.uv[0]), float(item.uv[1])) for item in layer.data]
+
+
+def _restore_uv_layer(obj, uv_name: str, coordinates: list[tuple[float, float]]) -> None:
+    layer = obj.data.uv_layers.get(uv_name)
+    if layer is None:
+        raise RuntimeError(f"UV map {uv_name!r} is missing on {obj.name}")
+    if len(layer.data) != len(coordinates):
+        raise RuntimeError(
+            f"UV layer size changed unexpectedly on {obj.name}: "
+            f"expected {len(coordinates)}, got {len(layer.data)}"
+        )
+    for index, (u, v) in enumerate(coordinates):
+        layer.data[index].uv = (u, v)
+
+
+def _pack_active_bake_uv(margin: float) -> None:
+    bpy.ops.uv.select_all(action="SELECT")
+    try:
+        bpy.ops.uv.average_islands_scale()
+    except Exception:
+        pass
+    try:
+        bpy.ops.uv.pack_islands(margin=margin, rotate=True, scale=True)
+    except TypeError:
+        try:
+            bpy.ops.uv.pack_islands(margin=margin)
+        except Exception:
+            bpy.ops.uv.pack_islands()
+    bpy.ops.uv.select_all(action="DESELECT")
+
+
+def _unwrap_bake_uv_with_sharp_seams(obj, *, seam_angle_radians: float, margin: float) -> None:
+    bpy.context.scene.tool_settings.use_uv_select_sync = True
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.mark_seam(clear=True)
+
+    try:
+        bpy.ops.mesh.select_mode(type="EDGE")
+    except TypeError:
+        bpy.ops.mesh.select_mode(use_extend=False, use_expand=False, type="EDGE")
+
+    bpy.ops.mesh.select_all(action="DESELECT")
+    bpy.ops.mesh.edges_select_sharp(sharpness=seam_angle_radians)
+    bpy.ops.mesh.mark_seam(clear=False)
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.unwrap(method="ANGLE_BASED", margin=max(0.0005, margin * 0.25))
+    _pack_active_bake_uv(margin)
+
+
+def _unwrap_bake_uv_with_smart_project(obj, *, angle_limit_radians: float, margin: float) -> None:
+    bpy.context.scene.tool_settings.use_uv_select_sync = True
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.smart_project(
+        angle_limit=angle_limit_radians,
+        island_margin=margin,
+        area_weight=0.0,
+        correct_aspect=True,
+        scale_to_bounds=True,
+    )
+    _pack_active_bake_uv(margin)
+
+
+def _uv_quality_score(report: dict) -> float:
+    """Lower is better; distortion is more important than island count.
+
+    The previous selector over-rewarded a 59-island atlas which severely
+    stretched the drone.  Density spread now dominates the score so compact
+    but distorted unwraps lose to a slightly more fragmented, stable atlas.
+    """
+    return (
+        report["density_spread_p95_p05"] * 1200.0
+        + report["density_spread_iqr"] * 600.0
+        + report["island_ratio"] * 250.0
+        + report["single_face_ratio"] * 150.0
+        - report["estimated_fill_ratio"] * 50.0
+    )
+
+
+def _format_uv_report(report: dict) -> str:
+    return (
+        f"faces={report['face_count']} "
+        f"islands={report['uv_island_count']} "
+        f"single_face_islands={report['single_face_island_count']} "
+        f"island_ratio={report['island_ratio']:.4f} "
+        f"fill_ratio≈{report['estimated_fill_ratio']:.4f} "
+        f"density_spread95={report['density_spread_p95_p05']:.3f}stops "
+        f"density_iqr={report['density_spread_iqr']:.3f}stops"
+    )
 
 
 def _rebuild_bake_uv(obj) -> dict:
@@ -651,36 +917,76 @@ def _rebuild_bake_uv(obj) -> dict:
             "before texturing."
         )
 
-    existing = obj.data.uv_layers.get("BakeUV")
-    if existing is not None:
-        obj.data.uv_layers.remove(existing)
+    # Margin expressed in UV space, targeting about 8 px of padding at the
+    # requested bake resolution. The previous 16 px default wasted too much of
+    # the atlas once the mesh had hundreds of islands.
+    margin = max(0.001, min(0.01, 8.0 / float(ARGS.texture_resolution)))
+    best_report = None
+    best_uv = None
+    best_strategy = None
+    candidate_reports: list[tuple[str, dict]] = []
 
-    layer = obj.data.uv_layers.new(name="BakeUV")
-    obj.data.uv_layers.active = layer
-    try:
-        layer.active_render = True
-    except Exception:
-        pass
+    strategies = [
+        {
+            "name": "sharp_seams_70deg",
+            "runner": lambda: _unwrap_bake_uv_with_sharp_seams(
+                obj,
+                seam_angle_radians=math.radians(70.0),
+                margin=margin,
+            ),
+        },
+        {
+            "name": "sharp_seams_55deg",
+            "runner": lambda: _unwrap_bake_uv_with_sharp_seams(
+                obj,
+                seam_angle_radians=math.radians(55.0),
+                margin=margin,
+            ),
+        },
+        {
+            "name": "smart_project_89deg",
+            "runner": lambda: _unwrap_bake_uv_with_smart_project(
+                obj,
+                angle_limit_radians=math.radians(89.0),
+                margin=margin,
+            ),
+        },
+    ]
 
-    bpy.ops.object.mode_set(mode="EDIT")
-    try:
-        bpy.context.scene.tool_settings.use_uv_select_sync = True
-        bpy.ops.mesh.select_all(action="SELECT")
-        # A high angle limit keeps adjacent triangles belonging to the same
-        # hard-surface panel together instead of creating a triangle-per-island
-        # atlas. The margin is expressed in UV space and corresponds to about
-        # 16 px at the requested bake resolution.
-        margin = max(0.002, min(0.02, 16.0 / float(ARGS.texture_resolution)))
-        bpy.ops.uv.smart_project(
-            angle_limit=math.radians(89.0),
-            island_margin=margin,
-            area_weight=0.0,
-            correct_aspect=True,
-            scale_to_bounds=True,
+    for strategy in strategies:
+        _create_fresh_bake_uv_layer(obj)
+        bpy.ops.object.mode_set(mode="EDIT")
+        try:
+            strategy["runner"]()
+        finally:
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+        obj.data.uv_layers.active = obj.data.uv_layers["BakeUV"]
+        try:
+            obj.data.uv_layers["BakeUV"].active_render = True
+        except Exception:
+            pass
+        obj.data.update()
+
+        report = _analyze_uv_islands(obj, "BakeUV")
+        report["quality_score"] = _uv_quality_score(report)
+        candidate_reports.append((strategy["name"], report))
+        log(
+            "BakeUV candidate for "
+            f"{obj.name} [{strategy['name']}]: {_format_uv_report(report)}"
         )
-    finally:
-        bpy.ops.object.mode_set(mode="OBJECT")
 
+        snapshot = _capture_uv_layer(obj, "BakeUV")
+        if best_report is None or report["quality_score"] < best_report["quality_score"]:
+            best_report = report
+            best_uv = snapshot
+            best_strategy = strategy["name"]
+
+    if best_report is None or best_uv is None or best_strategy is None:
+        raise RuntimeError(f"No BakeUV candidate could be generated for {obj.name}")
+
+    _create_fresh_bake_uv_layer(obj)
+    _restore_uv_layer(obj, "BakeUV", best_uv)
     obj.data.uv_layers.active = obj.data.uv_layers["BakeUV"]
     try:
         obj.data.uv_layers["BakeUV"].active_render = True
@@ -688,13 +994,11 @@ def _rebuild_bake_uv(obj) -> dict:
         pass
     obj.data.update()
 
-    report = _analyze_uv_islands(obj, "BakeUV")
+    report = dict(best_report)
+    report["selected_strategy"] = best_strategy
     log(
         "BakeUV rebuilt for "
-        f"{obj.name}: faces={report['face_count']} "
-        f"islands={report['uv_island_count']} "
-        f"single_face_islands={report['single_face_island_count']} "
-        f"island_ratio={report['island_ratio']:.4f}"
+        f"{obj.name} using {best_strategy}: {_format_uv_report(report)}"
     )
 
     # Do not silently bake/export the exact failure mode seen on worklight_01:
@@ -828,6 +1132,109 @@ def bake_direct(targets) -> list[str]:
     return baked_paths
 
 
+
+def _prepare_final_game_uvs(obj) -> None:
+    """Make the baked texture UV the first and only UV channel for export.
+
+    StableGen needs temporary/import/projection UV layers while projecting. The
+    final baked material, however, only uses ``BakeUV``. Leaving older UV layers
+    before BakeUV makes Blender's glTF exporter encode the BaseColor texture on
+    TEXCOORD_1 (or later). Asset Factory also asks Unreal to generate lightmap
+    UVs, whose normal destination is UV channel 1. That creates a channel
+    collision and the Unreal material can render with a repacked lightmap UV
+    instead of the baked texture UV.
+
+    At finalization all projection work is already complete, so remove every
+    non-BakeUV layer. BakeUV then becomes UV0/TEXCOORD_0 in both the saved .blend
+    and exported GLB. Unreal is free to generate its lightmap UV in channel 1.
+    """
+    layers = obj.data.uv_layers
+    bake = layers.get("BakeUV")
+    if bake is None:
+        raise RuntimeError(f"Dedicated BakeUV is missing on final object {obj.name}")
+
+    removed = []
+    for layer in list(layers):
+        if layer.name == "BakeUV":
+            continue
+        removed.append(str(layer.name))
+        layers.remove(layer)
+
+    bake = layers.get("BakeUV")
+    if bake is None or len(layers) != 1:
+        raise RuntimeError(
+            f"Could not reduce final UV set to BakeUV only on {obj.name}"
+        )
+    layers.active = bake
+    try:
+        bake.active_render = True
+    except Exception:
+        pass
+    obj.data.update()
+    log(
+        f"Final game UV contract for {obj.name}: BakeUV -> UV0; "
+        f"removed {len(removed)} projection/import UV layer(s)"
+    )
+
+
+def _read_glb_json(path: Path) -> dict:
+    with path.open("rb") as handle:
+        header = handle.read(12)
+        if len(header) != 12:
+            raise RuntimeError(f"Invalid GLB header: {path}")
+        magic, version, total_length = struct.unpack("<4sII", header)
+        if magic != b"glTF" or version != 2:
+            raise RuntimeError(f"Unsupported GLB header/version: {path}")
+
+        while handle.tell() < total_length:
+            chunk_header = handle.read(8)
+            if len(chunk_header) != 8:
+                break
+            chunk_length, chunk_type = struct.unpack("<II", chunk_header)
+            data = handle.read(chunk_length)
+            if chunk_type == 0x4E4F534A:  # JSON
+                return json.loads(data.decode("utf-8").rstrip("\x00 "))
+    raise RuntimeError(f"GLB JSON chunk not found: {path}")
+
+
+def _validate_final_glb_texture_uv0(path: Path) -> None:
+    """Refuse a final GLB whose baked BaseColor texture does not use UV0."""
+    document = _read_glb_json(path)
+    materials = document.get("materials", [])
+    textured_materials = 0
+    for material in materials:
+        pbr = material.get("pbrMetallicRoughness", {})
+        texture = pbr.get("baseColorTexture")
+        if texture is None:
+            continue
+        textured_materials += 1
+        tex_coord = int(texture.get("texCoord", 0))
+        if tex_coord != 0:
+            raise RuntimeError(
+                "Final GLB texture UV contract violated: material "
+                f"{material.get('name', '<unnamed>')} uses TEXCOORD_{tex_coord}; "
+                "baked BaseColor must use TEXCOORD_0 before Unreal import."
+            )
+
+    if textured_materials == 0:
+        raise RuntimeError(f"Final GLB contains no BaseColor texture: {path}")
+
+    for mesh in document.get("meshes", []):
+        for primitive in mesh.get("primitives", []):
+            material_index = primitive.get("material")
+            if material_index is None:
+                continue
+            attrs = primitive.get("attributes", {})
+            if "TEXCOORD_0" not in attrs:
+                raise RuntimeError(
+                    f"Final GLB primitive is missing TEXCOORD_0: {path}"
+                )
+
+    log(
+        f"Final GLB UV contract validated: {textured_materials} textured material(s) "
+        "use TEXCOORD_0"
+    )
+
 def finalize(targets, cameras, projected_blend, excluded, projection_risks) -> None:
     utils = import_stablegen("utils")
     get_dir_path = utils.get_dir_path
@@ -867,6 +1274,11 @@ def finalize(targets, cameras, projected_blend, excluded, projection_risks) -> N
         if cam and cam.name in bpy.data.objects:
             bpy.data.objects.remove(cam, do_unlink=True)
 
+    # Projection/import UV maps are implementation details. The final baked
+    # asset must expose its texture atlas as UV0 so glTF and Unreal agree on
+    # the texture coordinate channel.
+    for obj in targets:
+        _prepare_final_game_uvs(obj)
     select_only(targets)
 
     final_blend = (
@@ -898,6 +1310,7 @@ def finalize(targets, cameras, projected_blend, excluded, projection_risks) -> N
     )
     if not final_glb.is_file() or final_glb.stat().st_size == 0:
         raise RuntimeError(f"Final GLB was not created: {final_glb}")
+    _validate_final_glb_texture_uv0(final_glb)
 
     source_path = str(Path(ARGS.mesh).resolve())
     write_result(

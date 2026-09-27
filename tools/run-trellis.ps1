@@ -14,7 +14,7 @@ param(
     [string]$ModelsDir,
     [ValidateRange(0, [long]::MaxValue)]
     [long]$Seed = 1,
-    [double]$Simplify = 0.95,
+    [double]$Simplify = 0.0,
     [int]$TextureSize = 1024,
     [switch]$GeometryOnly,
     [switch]$SavePly,
@@ -32,6 +32,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Quality-first invariant: Asset Factory never decimates TRELLIS geometry.
+# Keep the parameter only so older manifests/commands do not break, but ignore
+# any non-zero value and record the effective value as 0.
+if ($Simplify -ne 0.0) {
+    Write-Warning "Simplify=$Simplify est ignore : la simplification TRELLIS est desactivee pour preserver la geometrie maximale."
+    $Simplify = 0.0
+}
 
 $AssetFactoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 . (Join-Path $PSScriptRoot "pipeline-common.ps1")

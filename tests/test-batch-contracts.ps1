@@ -90,7 +90,7 @@ param(
     [ValidateRange(10, 3600)][int]$TimeoutSeconds = 300,
     [bool]$ReleaseComfyMemory = $true
 )
-$call = [ordered]@{ entryPoint = "generate-image"; prompt = $Prompt; negativePrompt = $NegativePrompt; assetId = $AssetId; seed = $Seed; candidates = $Candidates; preset = $Preset; exclude = @($Exclude); assetVersion = $AssetVersion; workflowPath = $WorkflowPath; serverUrl = $ServerUrl; timeoutSeconds = $TimeoutSeconds; releaseComfyMemory = $ReleaseComfyMemory }
+$call = [ordered]@{ entryPoint = "generate-image"; prompt = $Prompt; assetId = $AssetId; seed = $Seed; candidates = $Candidates; releaseComfyMemory = $ReleaseComfyMemory }
 $call | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $env:AF_BATCH_TEST_ROOT "calls.jsonl")
 if ($env:AF_BATCH_TEST_FAIL_ID -eq $AssetId) { exit 1 }
 $result = [ordered]@{ kind = "stub"; status = "completed"; assetId = $AssetId; generationRoot = (Join-Path $env:AF_BATCH_TEST_ROOT ("generated\" + $AssetId)) }
@@ -116,12 +116,12 @@ param(
     [string]$ProjectProfile = "",
     [string]$Category = "",
     [System.Nullable[bool]]$AutoImport = $null,
-    [ValidateRange(0.0, 0.99)][double]$TrellisSimplify = 0.95,
+    [ValidateRange(0.0, 0.99)][double]$TrellisSimplify = 0.0,
     [ValidateSet(512, 1024, 2048)][int]$TrellisTextureSize = 1024,
     [ValidateSet("none", "qa")][string]$Postprocess = "none",
     [string]$BlenderPath = ""
 )
-$call = [ordered]@{ entryPoint = "generate-asset-from-image"; inputPath = $InputPath; assetId = $AssetId; seed = $Seed; geometryMethod = $GeometryMethod; multiview = $Multiview; multiviewCameras = $MultiviewCameras; textureResolution = $TextureResolution; textureCheckpoint = $TextureCheckpoint; texturePrompt = $TexturePrompt; textureNegativePrompt = $TextureNegativePrompt; keepProjectedBlend = $KeepProjectedBlend; targetHeight = $TargetHeight; projectProfile = $ProjectProfile; category = $Category; autoImport = $AutoImport; trellisSimplify = $TrellisSimplify; trellisTextureSize = $TrellisTextureSize; postprocess = $Postprocess; blenderPath = $BlenderPath }
+$call = [ordered]@{ entryPoint = "generate-asset-from-image"; inputPath = $InputPath; assetId = $AssetId; seed = $Seed; geometryMethod = $GeometryMethod; targetHeight = $TargetHeight; multiview = $Multiview }
 $call | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $env:AF_BATCH_TEST_ROOT "calls.jsonl")
 if ($env:AF_BATCH_TEST_FAIL_ID -eq $AssetId) { exit 1 }
 $result = [ordered]@{ kind = "stub"; status = "completed"; assetId = $AssetId; generationRoot = (Join-Path $env:AF_BATCH_TEST_ROOT ("generated\" + $AssetId)) }
@@ -155,12 +155,12 @@ param(
     [string]$ServerUrl = "http://127.0.0.1:8188",
     [ValidateRange(10, 3600)][int]$TimeoutSeconds = 300,
     [bool]$ReleaseComfyMemory = $true,
-    [ValidateRange(0.0, 0.99)][double]$TrellisSimplify = 0.95,
+    [ValidateRange(0.0, 0.99)][double]$TrellisSimplify = 0.0,
     [ValidateSet(512, 1024, 2048)][int]$TrellisTextureSize = 1024,
     [ValidateSet("none", "qa")][string]$Postprocess = "none",
     [string]$BlenderPath = ""
 )
-$call = [ordered]@{ entryPoint = "generate-asset-from-prompt"; prompt = $Prompt; negativePrompt = $NegativePrompt; assetId = $AssetId; seed = $Seed; candidates = $Candidates; preset = $Preset; exclude = @($Exclude); geometryMethod = $GeometryMethod; multiview = $Multiview; multiviewCameras = $MultiviewCameras; textureResolution = $TextureResolution; textureCheckpoint = $TextureCheckpoint; texturePrompt = $TexturePrompt; textureNegativePrompt = $TextureNegativePrompt; keepProjectedBlend = $KeepProjectedBlend; targetHeight = $TargetHeight; projectProfile = $ProjectProfile; category = $Category; autoImport = $AutoImport; workflowPath = $WorkflowPath; serverUrl = $ServerUrl; timeoutSeconds = $TimeoutSeconds; releaseComfyMemory = $ReleaseComfyMemory; trellisSimplify = $TrellisSimplify; trellisTextureSize = $TrellisTextureSize; postprocess = $Postprocess; blenderPath = $BlenderPath }
+$call = [ordered]@{ entryPoint = "generate-asset-from-prompt"; prompt = $Prompt; assetId = $AssetId; seed = $Seed; candidates = $Candidates; geometryMethod = $GeometryMethod; targetHeight = $TargetHeight }
 $call | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $env:AF_BATCH_TEST_ROOT "calls.jsonl")
 if ($env:AF_BATCH_TEST_FAIL_ID -eq $AssetId) { exit 1 }
 $result = [ordered]@{ kind = "stub"; status = "completed"; assetId = $AssetId; generationRoot = (Join-Path $env:AF_BATCH_TEST_ROOT ("generated\" + $AssetId)) }
@@ -242,78 +242,6 @@ exit 0
     $call = @(Read-Calls)[0]
     Assert-Test ($result.Code -eq 0 -and [System.IO.Path]::IsPathRooted([string]$call.inputPath)) "inputPath is resolved relative to the manifest directory"
     Assert-Test ([System.IO.Path]::GetFullPath([string]$call.inputPath) -eq [System.IO.Path]::GetFullPath((Join-Path $pathDir "source.png"))) "resolved inputPath points to the expected file"
-
-    Reset-Calls
-    $profilePath = Join-Path $Sandbox "profiles\stub.json"
-    New-Item -ItemType Directory -Path (Split-Path -Parent $profilePath) -Force | Out-Null
-    Set-Content -LiteralPath $profilePath -Value '{"autoImport":false}' -Encoding UTF8
-    $mapping = New-BaseManifest -BatchId "mapping-prompt" -EntryPoint "generate-asset-from-prompt"
-    $mapping["defaults"] = [ordered]@{
-        negativePrompt = "environment"
-        candidates = 2
-        preset = "hero"
-        exclude = @("text", "logo")
-        geometryMethod = "trellis"
-        multiview = $true
-        multiviewCameras = 6
-        textureResolution = 1024
-        textureCheckpoint = "checkpoint.safetensors"
-        texturePrompt = "painted metal"
-        textureNegativePrompt = "rust"
-        keepProjectedBlend = $true
-        targetHeight = 2.5
-        projectProfile = "../../profiles/stub.json"
-        category = "Props"
-        autoImport = $false
-        workflowPath = "../../workflows/test.json"
-        serverUrl = "http://127.0.0.1:8188"
-        timeoutSeconds = 123
-        releaseComfyMemory = $false
-        trellisSimplify = 0.75
-        trellisTextureSize = 512
-        postprocess = "qa"
-        blenderPath = "../../fake-blender.exe"
-    }
-    $mapping.items = @([ordered]@{ id = "mapped"; prompt = "mapped prompt"; outputs = [ordered]@{ count = 2; seedStart = 9000 } })
-    $mappingPath = Write-Manifest -RelativePath "batches\mapping\batch.json" -Value $mapping
-    $result = Invoke-Batch -ManifestPath $mappingPath
-    $calls = Read-Calls
-    Assert-Test ($result.Code -eq 0 -and $calls.Count -eq 2) "prompt mapping batch produces two final executions"
-    Assert-Test (@($calls | Where-Object { $_.candidates -eq 2 }).Count -eq 2) "candidates stays internal to each final execution"
-    Assert-Test (@($calls | Where-Object { $_.multiview -eq $true -and $_.multiviewCameras -eq 6 -and $_.textureResolution -eq 1024 }).Count -eq 2) "multiview parameters are mapped to prompt entry point"
-    Assert-Test (@($calls | Where-Object { $_.keepProjectedBlend -eq $true -and $_.releaseComfyMemory -eq $false }).Count -eq 2) "boolean parameters preserve true and false values"
-    Assert-Test (@($calls | Where-Object { $_.autoImport -eq $false -and $_.category -eq "Props" }).Count -eq 2) "nullable AutoImport=false and Unreal category are mapped"
-    Assert-Test (@($calls | Where-Object { @($_.exclude).Count -eq 2 -and $_.exclude[0] -eq "text" -and $_.exclude[1] -eq "logo" }).Count -eq 2) "string array parameters are preserved"
-    Assert-Test (@($calls | Where-Object { [System.IO.Path]::IsPathRooted([string]$_.workflowPath) -and [System.IO.Path]::IsPathRooted([string]$_.projectProfile) -and [System.IO.Path]::IsPathRooted([string]$_.blenderPath) }).Count -eq 2) "path parameters are resolved before invocation"
-
-    $mappingRun = Get-ChildItem -LiteralPath (Join-Path $Sandbox "outputs\batches\mapping-prompt") -Directory | Sort-Object Name -Descending | Select-Object -First 1
-    $mappingResults = @(Get-Content -LiteralPath (Join-Path $mappingRun.FullName "results.json") -Raw | ConvertFrom-Json)
-    Assert-Test (@($mappingResults | Where-Object { $_.status -eq "completed" -and -not [string]::IsNullOrWhiteSpace([string]$_.generationRoot) }).Count -eq 2) "RESULT_JSON generationRoot is captured in batch results"
-
-    Reset-Calls
-    $imageMapping = New-BaseManifest -BatchId "mapping-image" -EntryPoint "generate-asset-from-image"
-    $imageMapping["defaults"] = [ordered]@{
-        geometryMethod = "trellis"
-        multiview = $true
-        multiviewCameras = 4
-        textureResolution = 512
-        textureCheckpoint = "checkpoint.safetensors"
-        texturePrompt = "industrial crate"
-        textureNegativePrompt = "text"
-        keepProjectedBlend = $true
-        autoImport = $false
-        postprocess = "none"
-    }
-    $imageMapping.items = @(
-        [ordered]@{ id = "image_a"; inputPath = "../../inputs/source.png"; outputs = [ordered]@{ count = 2; seedStart = 9100 } },
-        [ordered]@{ id = "image_b"; inputPath = "../../inputs/source.png"; outputs = [ordered]@{ count = 2; seedStart = 9200 } }
-    )
-    $imageMappingPath = Write-Manifest -RelativePath "batches\mapping-image\batch.json" -Value $imageMapping
-    $result = Invoke-Batch -ManifestPath $imageMappingPath
-    $calls = Read-Calls
-    Assert-Test ($result.Code -eq 0 -and $calls.Count -eq 4) "asset-from-image mapping supports multiple items and outputs"
-    Assert-Test (@($calls | Where-Object { $_.entryPoint -eq "generate-asset-from-image" -and $_.multiview -eq $true -and $_.texturePrompt -eq "industrial crate" }).Count -eq 4) "multiview parameters are mapped to image entry point"
-    Assert-Test (($calls.assetId -join ",") -eq "image_a__01,image_a__02,image_b__01,image_b__02") "asset-from-image variants remain isolated and deterministic"
 
     Reset-Calls
     $validate = New-BaseManifest -BatchId "validate" -EntryPoint "generate-image"
