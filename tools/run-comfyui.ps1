@@ -186,25 +186,6 @@ if (-not (Test-Path -LiteralPath $ResolvedWorkflowPath -PathType Leaf)) {
 Write-Ok "Workflow trouvé : $ResolvedWorkflowPath"
 
 # -----------------------------------------------------------------------------
-# Validation de l'API ComfyUI
-# -----------------------------------------------------------------------------
-
-$SystemStatsUrl = "$ServerUrl/system_stats"
-
-try {
-    Invoke-RestMethod `
-        -Uri $SystemStatsUrl `
-        -Method Get `
-        -TimeoutSec 5 | Out-Null
-
-    Write-Ok "API ComfyUI disponible : $SystemStatsUrl"
-} catch {
-    Write-Fail "API ComfyUI indisponible : $SystemStatsUrl"
-    Write-Info $_.Exception.Message
-    exit 1
-}
-
-# -----------------------------------------------------------------------------
 # Chargement et validation du workflow JSON
 # -----------------------------------------------------------------------------
 

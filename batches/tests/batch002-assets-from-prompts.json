@@ -1,0 +1,41 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "batch002_assets_from_prompts",
+  "description": "BATCH-002 real validation: two prompts, two final 3D assets per prompt.",
+  "entryPoint": "generate-asset-from-prompt",
+  "execution": {
+    "continueOnError": false,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "candidates": 1,
+    "geometryMethod": "trellis",
+    "multiview": false,
+    "targetHeight": 1.0,
+    "autoImport": false,
+    "workflowPath": "../../workflows/comfyui-flux-schnell-base.json",
+    "releaseComfyMemory": true,
+    "postprocess": "none"
+  },
+  "items": [
+    {
+      "id": "batch002_prompt_crate",
+      "prompt": "isolated rugged sci-fi cargo crate, single object, full object visible, centered, clean background",
+      "outputs": {
+        "count": 2,
+        "seedStart": 8100,
+        "seedStep": 1
+      }
+    },
+    {
+      "id": "batch002_prompt_tank",
+      "prompt": "isolated industrial cylindrical fuel tank, single object, full object visible, centered, clean background",
+      "outputs": {
+        "count": 2,
+        "seedStart": 8200,
+        "seedStep": 1
+      }
+    }
+  ]
+}

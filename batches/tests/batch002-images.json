@@ -1,0 +1,36 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "batch002_images",
+  "description": "BATCH-002 real validation: two prompts, two final images per prompt.",
+  "entryPoint": "generate-image",
+  "execution": {
+    "continueOnError": false,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "candidates": 1,
+    "workflowPath": "../../workflows/comfyui-flux-schnell-base.json",
+    "releaseComfyMemory": true
+  },
+  "items": [
+    {
+      "id": "batch002_rock",
+      "prompt": "isolated dark basalt rock, full object visible, centered, clean background",
+      "outputs": {
+        "count": 2,
+        "seedStart": 6100,
+        "seedStep": 1
+      }
+    },
+    {
+      "id": "batch002_crate",
+      "prompt": "isolated rugged sci-fi cargo crate, full object visible, centered, clean background",
+      "outputs": {
+        "count": 2,
+        "seedStart": 6200,
+        "seedStep": 1
+      }
+    }
+  ]
+}

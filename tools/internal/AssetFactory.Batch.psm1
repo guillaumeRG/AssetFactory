@@ -604,7 +604,38 @@ function Get-AFBatchResolvedPlan {
 
 function Save-AFBatchJson {
     param([Parameter(Mandatory = $true)]$Value, [Parameter(Mandatory = $true)][string]$Path)
-    ConvertTo-Json -InputObject $Value -Depth 40 | Set-Content -LiteralPath $Path -Encoding UTF8
+
+    # Batch state is used for crash recovery. Write a complete sibling file first,
+    # then replace the destination so -Resume never observes a partially written JSON.
+    $directory = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $fileName = [System.IO.Path]::GetFileName($Path)
+    $temporaryPath = Join-Path $directory ($fileName + ".tmp-" + [guid]::NewGuid().ToString("N"))
+    $backupPath = Join-Path $directory ($fileName + ".bak-" + [guid]::NewGuid().ToString("N"))
+    $json = ConvertTo-Json -InputObject $Value -Depth 40
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+
+    try {
+        [System.IO.File]::WriteAllText($temporaryPath, $json, $utf8Bom)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # Windows PowerShell 5.1 / .NET Framework can reject the three-argument
+            # Replace overload when the backup path is passed as $null. Use a real
+            # sibling backup path so the replacement remains atomic on Windows.
+            [System.IO.File]::Replace($temporaryPath, $Path, $backupPath)
+        } else {
+            [System.IO.File]::Move($temporaryPath, $Path)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Save-AFBatchResults {

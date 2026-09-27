@@ -394,6 +394,16 @@ batches/examples/assets-from-images.json
 batches/examples/assets-from-prompts.json
 ```
 
+Manifests de validation BATCH-002 (2 items x 2 outputs chacun) :
+
+```text
+batches/tests/batch002-images.json
+batches/tests/batch002-assets-from-images.json
+batches/tests/batch002-assets-from-prompts.json
+```
+
+Ils sont prevus pour une validation locale reelle du runner sur la machine Asset Factory. Commencer par `-ValidateOnly`, puis lancer les manifests sans cette option lorsque ComfyUI/TRELLIS/Blender sont disponibles.
+
 ---
 
 ## Sorties

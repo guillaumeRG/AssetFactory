@@ -1,0 +1,38 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "batch002_assets_from_images",
+  "description": "BATCH-002 real validation: two repository reference images, two assets per image.",
+  "entryPoint": "generate-asset-from-image",
+  "execution": {
+    "continueOnError": false,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "geometryMethod": "trellis",
+    "multiview": false,
+    "targetHeight": 1.0,
+    "autoImport": false,
+    "postprocess": "none"
+  },
+  "items": [
+    {
+      "id": "batch002_from_barrel",
+      "inputPath": "../../docs/images/Barrel.png",
+      "outputs": {
+        "count": 2,
+        "seedStart": 7100,
+        "seedStep": 1
+      }
+    },
+    {
+      "id": "batch002_from_fuel_tank",
+      "inputPath": "../../docs/images/FuelTank_01.png",
+      "outputs": {
+        "count": 2,
+        "seedStart": 7200,
+        "seedStep": 1
+      }
+    }
+  ]
+}

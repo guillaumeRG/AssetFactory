@@ -129,6 +129,39 @@ class BatchStaticTests(unittest.TestCase):
         for token in ('Batch manifests', '-ManifestPath', '-ValidateOnly', '-Resume', 'outputs.count', 'candidates'):
             self.assertIn(token, readme)
 
+    def test_batch002_validation_manifests_cover_three_real_families(self):
+        manifests = {
+            'batches/tests/batch002-images.json': ('generate-image', 6100, 6200),
+            'batches/tests/batch002-assets-from-images.json': ('generate-asset-from-image', 7100, 7200),
+            'batches/tests/batch002-assets-from-prompts.json': ('generate-asset-from-prompt', 8100, 8200),
+        }
+        for path, (entrypoint, first_seed, second_seed) in manifests.items():
+            data = self.json(path)
+            self.assertEqual(data['kind'], 'asset-factory-batch')
+            self.assertEqual(data['schemaVersion'], 1)
+            self.assertEqual(data['entryPoint'], entrypoint)
+            self.assertEqual(len(data['items']), 2)
+            self.assertTrue(all(item['outputs']['count'] >= 2 for item in data['items']))
+            self.assertEqual(data['items'][0]['outputs']['seedStart'], first_seed)
+            self.assertEqual(data['items'][1]['outputs']['seedStart'], second_seed)
+
+        image_manifest = self.json('batches/tests/batch002-assets-from-images.json')
+        manifest_dir = ROOT / 'batches/tests'
+        for item in image_manifest['items']:
+            self.assertTrue((manifest_dir / item['inputPath']).resolve().is_file())
+
+    def test_batch_state_json_is_written_atomically(self):
+        code = self.text('tools/internal/AssetFactory.Batch.psm1')
+        start = code.index('function Save-AFBatchJson')
+        end = code.index('function Save-AFBatchResults', start)
+        save_code = code[start:end]
+        self.assertIn('[System.IO.File]::WriteAllText', save_code)
+        self.assertIn('[System.IO.File]::Replace', save_code)
+        self.assertIn('$backupPath', save_code)
+        self.assertNotIn('[System.IO.File]::Replace($temporaryPath, $Path, $null)', save_code)
+        self.assertIn('[System.IO.File]::Move', save_code)
+        self.assertNotIn('Set-Content -LiteralPath $Path', save_code)
+
 
 if __name__ == '__main__':
     unittest.main()

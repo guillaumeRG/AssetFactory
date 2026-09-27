@@ -108,6 +108,13 @@ class CycleStaticTests(unittest.TestCase):
         self.assertIn('Start-AFComfyServer `', pipeline)
         self.assertIn('-LogPrefix "multiview-comfyui"', pipeline)
 
+    def test_comfy_autostart_precedes_any_api_requirement(self):
+        code = self.text("tools/run-comfyui.ps1")
+        start_index = code.index('Start-AFComfyServer `')
+        prefix = code[:start_index]
+        self.assertNotIn('$SystemStatsUrl', prefix)
+        self.assertNotIn('API ComfyUI indisponible', prefix)
+
     def test_comfy_release_is_not_an_interrupt_or_queue_clear(self):
         code = self.text("tools/pipeline-common.ps1")
         self.assertIn('"$baseUrl/free"', code)

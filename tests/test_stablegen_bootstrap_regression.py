@@ -35,3 +35,13 @@ def test_multiview_doctor_smoke_tests_blender_addon_preferences():
     assert 'BLENDER_USER_CONFIG' in setup
     assert 'default_set=True' in smoke
     assert 'get_addon_prefs' in smoke
+
+
+def test_final_bake_forces_vendor_to_use_dedicated_bake_uv():
+    driver = text("tools/internal/multiview_texture_driver.py")
+    assert "def _mask_non_bake_uvs_for_vendor_bake" in driver
+    assert 'name.startswith("ProjectionUV")' in driver
+    assert 'candidate = f"ProjectionUV_AF_BAKE_SKIP_{index}"' in driver
+    assert "renamed_uvs = _mask_non_bake_uvs_for_vendor_bake(obj)" in driver
+    assert "_restore_masked_uv_names(obj, renamed_uvs)" in driver
+    assert driver.index("renamed_uvs = _mask_non_bake_uvs_for_vendor_bake(obj)") < driver.index("ok = bake_texture(")

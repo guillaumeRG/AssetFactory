@@ -1,0 +1,121 @@
+{
+  "kind": "asset-factory-batch",
+  "schemaVersion": 1,
+  "batchId": "nullon_multiview_assets_01",
+  "description": "NullOn asset batch from prompts - TRELLIS geometry + StableGen multiview texturing",
+  "entryPoint": "generate-asset-from-prompt",
+  "execution": {
+    "continueOnError": true,
+    "maxParallelism": 1
+  },
+  "defaults": {
+    "negativePrompt": "text, typography, logo, watermark, person, human, extra objects, complex environment, cropped object",
+    "candidates": 4,
+    "geometryMethod": "trellis",
+    "multiview": true,
+    "multiviewCameras": 8,
+    "textureResolution": 2048,
+    "autoImport": false,
+    "postprocess": "none"
+  },
+  "items": [
+    {
+      "id": "maintenance_drone",
+      "prompt": "Un rendu 3D ultra détaillé, photoréaliste, de type concept art / game asset showcase, montrant un unique drone de maintenance sci-fi industriel de l’univers NullOn, isolé sur un fond studio gris neutre avec un léger dégradé, composition carrée 1:1, vue en trois-quarts avant, cadrage serré mais laissant voir l’objet entier, aucune personne, aucun texte, aucun décor parasite.\n\nLe drone est compact mais dense, massif, crédible, conçu pour la maintenance, la réparation et l’inspection technique en environnement spatial. Son corps principal est une caisse blindée rectangulaire, large et épaisse, avec une silhouette utilitaire robuste. Le design doit être hard-surface, modulaire, fonctionnel, avec de nombreux panneaux vissés, trappes techniques, grilles d’aération, nervures, renforts, poignées métalliques, arêtes chanfreinées, boulons visibles, tuyaux externes, câbles gainés et petits modules intégrés.\n\nPalette visuelle : peinture blanc cassé / gris très clair usée, métal gunmetal sombre, inserts noirs, accents orange industriels de sécurité sous forme de bandes, plaques ou marquages de maintenance. Les matériaux doivent montrer une usure réaliste : peinture écaillée sur les arêtes, rayures, poussière, petites traces de graisse, micro-impacts, salissures dans les creux, métal exposé par endroits.\n\nÀ l’avant, le drone possède un bloc capteur frontal très lisible, ressemblant à une “face” technique : une grande lentille principale circulaire, une seconde optique plus petite, plusieurs capteurs secondaires, et des barres lumineuses verticales ou rectangulaires de chaque côté, avec une lueur chaude ambre/orange et quelques petites lumières blanches froides. Ce module frontal doit être enchâssé dans un cadre de protection métallique épais.\n\nLe drone flotte légèrement au-dessus du sol grâce à plusieurs propulseurs ou modules de sustentation intégrés sous le corps et sur les côtés. Chaque module de propulsion est compact, angulaire, blindé, avec sorties lumineuses douces sous les blocs, créant un léger halo de poussée orangé. Le drone ne doit pas avoir l’air agressif ou militaire : il est clairement utilitaire, technique, de maintenance.\n\nSous l’avant du corps se trouvent deux bras robotisés articulés, asymétriques mais cohérents : un premier bras se termine par une pince multifonction mécanique à plusieurs doigts métalliques, conçue pour saisir des pièces ; le second bras se termine par un outil technique de précision, de type sonde, perceuse fine, soudure ou outil de maintenance. Les articulations sont robustes, avec pivots circulaires, vérins, câbles et segments blindés. Chaque bras doit être crédible mécaniquement, avec détails de charnières, rotules, colliers, gaines, connecteurs et petits témoins lumineux.\n\nLe dessus du drone comporte quelques antennes courtes, tubes, poignées structurelles et petits modules secondaires. Le dessous comporte plusieurs lumières de travail, éclairages de service, et blocs fonctionnels. L’ensemble doit transmettre l’idée d’un drone de maintenance haut de gamme, solide, utilisé, réaliste, fait pour évoluer dans des bases, vaisseaux et structures spatiales.\n\nÉclairage studio doux et propre, ombres subtiles, matériaux PBR très lisibles, fort niveau de détail, netteté élevée, qualité concept art AAA, aucune typographie, aucun watermark, aucun environnement complexe.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9100,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 1.2,
+        "texturePrompt": "worn off-white painted metal, dark gunmetal structure, black inserts, industrial orange safety accents, realistic scratches, chipped edges, grease, dust, PBR hard-surface materials",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    },
+    {
+      "id": "pilot_seat",
+      "prompt": "Un rendu 3D photoréaliste de très haute qualité, format carré 1:1, montrant un unique siège de pilote sci-fi industriel de l’univers NullOn, présenté comme un asset isolé sur fond studio gris neutre légèrement dégradé, vue en trois-quarts avant, objet entièrement visible, aucun personnage, aucun texte, aucun décor.\n\nLe siège doit évoquer un fauteuil de pilotage modulaire, robuste, fonctionnel, destiné à un cockpit de vaisseau ou à un poste de commande industriel. Le design est hard-surface, crédible, utilitaire mais élégant, avec une base technique lourde, une structure porteuse en métal, un dossier haut, des accoudoirs techniques et un système de harnais intégré.\n\nLa structure globale du siège est massive et stable. La palette est cohérente avec NullOn : peintures blanc cassé et gris clair usées, métal sombre gunmetal, quelques éléments noirs ou anthracite, accents orange industriels de sécurité, petites lumières chaudes ambre/orange. Le vieillissement doit être visible mais modéré : rayures, arêtes écaillées, traces d’usage, salissures fines, micro-grime dans les jonctions, usure réaliste sans être délabrée.\n\nLe dossier est haut, segmenté, rembourré, avec des coussins sombres en matériau technique ou simili cuir industriel noir/gris foncé. Le dossier et l’assise doivent être ergonomiques, épais et crédibles, composés de plusieurs segments rembourrés avec coutures visibles. Un appuie-tête massif prolonge le haut du siège.\n\nLe siège intègre un harnais multi-points, épais, visible et réaliste : sangles noires, boucles métalliques, attaches orange ou plaques de fixation colorées, boucle centrale sur le bassin. Le harnais doit bien s’intégrer visuellement au siège et renforcer son côté pilote spatial / industriel.\n\nLes deux accoudoirs sont volumineux et mécaniques, avec un design modulaire blindé. Chacun porte une poignée ou mini-joystick de contrôle, compacte mais détaillée, avec formes ergonomiques, boutons ou surfaces techniques simplifiées, et petits accents orange. Les accoudoirs peuvent intégrer plaques, vis, trappes et petites lumières.\n\nLa base du siège est un socle technique dense, composé de rails, renforts, éléments mécaniques, grilles, aérations, supports, articulations, peut-être des éléments de suspension ou d’absorption. L’ensemble doit suggérer un siège réglable, solidement fixé à un module de cockpit. La base doit avoir un bon poids visuel, avec structure en couches, cadres, fentes et détails mécaniques crédibles.\n\nAjouter quelques bandes lumineuses discrètes ambre/orange intégrées à la structure, sans tomber dans le gadget. Le siège doit paraître immédiatement utilisable dans un cockpit NullOn : robuste, industriel, fonctionnel, plausible, avec une forte identité visuelle cohérente avec un univers spatial de survie / construction.\n\nÉclairage studio propre, ombres douces, rendu PBR haut de gamme, netteté élevée, aucun texte, aucune interface, aucun humain.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9200,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 1.4,
+        "texturePrompt": "worn off-white and light gray painted metal, dark technical padding, gunmetal structure, black harness straps, orange industrial accents, realistic PBR wear",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    },
+    {
+      "id": "industrial_tank",
+      "prompt": "Un rendu 3D concept art / asset render photoréaliste, format carré 1:1, montrant un unique module-réservoir industriel sci-fi de l’univers NullOn, isolé sur fond studio gris neutre, vue en trois-quarts, objet centré et entièrement visible, aucune personne, aucun texte, aucun décor parasite.\n\nLe réservoir est un gros module horizontal de stockage, destiné à contenir du carburant, du gaz, de l’eau ou un fluide technique dans une base ou un vaisseau spatial. Son apparence doit être immédiatement lisible comme un équipement lourd, modulaire, transportable, industrialisé, robuste et crédible.\n\nLe cœur du module est une grande cuve cylindrique horizontale, épaisse, enchâssée dans un cadre structurel rectangulaire massif. La cuve doit être en blanc cassé / gris clair, très légèrement salie, avec grandes plaques de carrosserie et quelques bandes ou panneaux orange de sécurité. La structure extérieure doit être plus sombre, en gunmetal, avec renforts, longerons, brides, attaches, rails, coins renforcés, et points de manutention.\n\nLe cadre doit comporter des éléments très lisibles : coins blindés, ancrages, cadres en X ou triangulations, poignées, pieds techniques, supports de levage, zones de fixation. Le bas du module repose sur une semelle lourde ou des patins techniques, avec plaques, aérations, et détails industriels.\n\nLe cylindre principal est maintenu par plusieurs brides ou colliers larges, avec segments structurels et renforts. Des conduites secondaires, tuyaux latéraux, raccords, collecteurs et coudes métalliques longent les côtés et l’extrémité du module. Une extrémité peut comporter un ensemble technique plus dense, avec tuyauterie, vannes, connecteurs et plaque d’accès ronde ou trappe circulaire. Le dessus peut inclure une trappe de maintenance, une bride, une petite coupole technique ou un bouchon de service.\n\nLa matière doit être lisible et réaliste : métal peint, bords usés, peinture légèrement écaillée, poussière, traces de coulure, salissures légères autour des joints, grilles et tuyaux. Quelques petites lumières ambre/orange intégrées dans le cadre ou les brides doivent ajouter de la vie à l’objet sans le rendre futuriste excessif.\n\nLe design doit rester fonctionnel, modulaire, constructible en jeu, et cohérent avec une base spatiale NullOn. Pas de forme organique, pas de fantasy : uniquement un design industriel spatial crédible, propre, détaillé, réutilisable comme asset de gameplay.\n\nÉclairage studio propre, ombres douces, rendu PBR haut de gamme, détails très nets, aucun texte, aucun personnage, aucune scène complexe.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9300,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 2.0,
+        "texturePrompt": "off-white painted cylindrical tank, dark gunmetal structural frame, orange safety accents, realistic metal, pipes, fittings, subtle grime, chipped paint, PBR materials",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    },
+    {
+      "id": "thruster",
+      "prompt": "Un rendu 3D photoréaliste ultra détaillé de style concept art / game asset render, format carré 1:1, montrant un unique module de propulsion spatiale / thruster de l’univers NullOn, isolé sur un fond studio gris neutre avec léger dégradé, vue en trois-quarts avant, aucun humain, aucun texte, aucun décor.\n\nL’objet est un propulseur spatial industriel modulaire, conçu pour être monté sur un vaisseau, une plateforme ou un véhicule spatial. Il doit avoir une silhouette très lisible : un bloc technique rectangulaire à l’arrière, une section mécanique/cylindrique centrale, puis une grande tuyère à l’avant, large, profonde, crédible, mise en valeur dans le cadrage.\n\nLe design doit être hard-surface, lourd, fonctionnel, réaliste. À l’arrière et sur les côtés, on voit un caisson structurel blindé avec panneaux vissés, grilles d’aération, renforts, plaques, coins protégés, barres de structure et éléments de fixation. La palette reste cohérente avec NullOn : blanc cassé et gris clair usés pour les panneaux, métal sombre gunmetal pour les structures et mécanismes, accents orange industriels, petites lumières ambre/orange intégrées.\n\nLa partie centrale du moteur doit montrer la mécanique : couronnes métalliques, anneaux, colliers, grilles thermiques, tuyaux, conduites, câbles, supports, éventuelles protections perforées ou maillage métallique autour de la chambre. Il faut sentir un système complexe mais crédible, avec pièces imbriquées, interfaces techniques et structure de maintien.\n\nLa tuyère est l’élément vedette. Elle doit être large, creuse, profonde, avec un intérieur métallique marqué par la chaleur : métal bruni, traces bronze/cuivrées, légère suie ou patine thermique, segments internes visibles, nervures radiales ou panneaux thermiques. Le bord externe de la tuyère est renforcé par des plaques ou anneaux boulonnés, avec mécanique visible à sa base.\n\nLes matériaux doivent être très lisibles : peinture écaillée sur les arêtes, rayures, micro-impacts, zones grasses autour des raccords, usure cohérente. Les petits éclairages intégrés (barres lumineuses, voyants) doivent être discrets et chauds, en ambre/orange, pour rappeler le reste de la gamme d’assets NullOn.\n\nL’ensemble doit paraître assez compact pour être un module posable, mais assez puissant et sophistiqué pour un usage spatial. Il doit respirer la technologie pratique, la modularité et la robustesse, et non le design militaire agressif.\n\nFond neutre, éclairage studio propre, ombres subtiles, rendu PBR de très haut niveau, netteté élevée, aucune interface, aucune typographie, aucun personnage.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9400,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 1.5,
+        "texturePrompt": "worn off-white panels, dark gunmetal mechanics, heat-stained nozzle metal, bronze and copper thermal discoloration, industrial orange accents, realistic PBR materials",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    },
+    {
+      "id": "wall_lamp",
+      "prompt": "Un rendu 3D photoréaliste, format carré 1:1, de style concept art / asset render, montrant une unique lampe industrielle sci-fi murale de l’univers NullOn, isolée sur un fond studio gris neutre légèrement dégradé, vue en trois-quarts, aucun humain, aucun texte, aucun décor parasite.\n\nLa lampe doit être conçue comme un équipement d’éclairage fonctionnel pour une base spatiale, un couloir technique, un atelier ou un habitat. Elle doit avoir une forte lisibilité fonctionnelle : une platine de fixation murale, un bras mécanique robuste, et un corps lumineux suspendu ou déporté.\n\nLa structure de fixation murale est un bloc rectangulaire lourd, blindé, modulaire, avec plaques, vis, ouvertures techniques, renforts et éventuellement quelques fentes de ventilation. Depuis ce bloc part un bras mécanique épais, en métal, composé de plusieurs segments hard-surface, avec découpes structurelles, charnières ou bagues de rotation, boulons et formes angulaires industrielles. Le bras doit être crédible et visuellement robuste.\n\nAu bout de ce bras se trouve le corps lumineux principal : un module vertical de type lanterne / tube protégé, avec une source lumineuse forte et chaude au centre. La source lumineuse doit être visible derrière un verre ou polymère technique transparent légèrement sale, à l’intérieur d’une cage de protection métallique. Le corps de la lampe peut combiner formes rectangulaires et cylindriques, avec coins blindés, plaques, petites grilles et détails techniques.\n\nLa lumière émise est chaude, ambre/blanc chaud, puissante mais agréable, avec un léger halo lumineux. Le reste de l’objet suit la DA NullOn : peinture blanc cassé / gris clair, métal sombre, accents orange industriels, petites traces d’usure, rayures, poussière, peinture légèrement écaillée sur les arêtes, salissures fines dans les creux.\n\nLe corps lumineux doit intégrer des détails secondaires : petites barres lumineuses, grilles, rainures, colliers, jonctions mécaniques, base et sommet renforcés, petites zones en gunmetal et inserts orange. Le design doit être pratique et posable en environnement de jeu, pas purement décoratif.\n\nL’objet doit évoquer une base spatiale crédible, où chaque élément est pensé pour la fonctionnalité, la maintenance et la durabilité. Il faut un rendu propre, lisible, premium, de type asset de jeu AAA, avec silhouette claire et matériaux PBR convaincants.\n\nÉclairage studio doux, ombres propres, fond neutre, aucun texte, aucun personnage, aucun élément parasite.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9500,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 0.6,
+        "texturePrompt": "off-white painted industrial housing, dark gunmetal arm and cage, warm amber light source, orange industrial accents, realistic scratches, dust and PBR materials",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    },
+    {
+      "id": "generator",
+      "prompt": "Un rendu 3D photoréaliste ultra détaillé, format carré 1:1, de style concept art / game asset render, montrant un unique générateur industriel sci-fi de l’univers NullOn, isolé sur un fond studio gris neutre, vue en trois-quarts avant, aucun humain, aucun texte, aucun décor parasite.\n\nLe générateur doit apparaître comme un module énergétique lourd, compact, modulaire, très crédible, conçu pour alimenter une base, un habitat ou un petit vaisseau. Son design doit mêler un châssis structurel blindé et une section centrale énergétique plus complexe.\n\nLa silhouette générale est un gros parallélépipède technique, posé sur une base lourde avec pieds ou patins. L’objet est encadré par une structure externe renforcée, avec montants, coins blindés, cadres secondaires, plaques de protection, grilles, aérations, trappes d’accès, poignées et zones de fixation. Il doit paraître dense, solide et transportable.\n\nAu centre du module, on doit voir un cœur énergétique mécanique : un gros tambour, rotor, noyau cylindrique ou alternateur, partiellement apparent au travers de la structure. Ce cœur central doit être ceinturé d’anneaux, bagues, supports, conduites et pièces mécaniques. Il peut émettre une lueur discrète ambre/orange à travers certaines ouvertures ou fentes.\n\nLes côtés et la face avant doivent comporter des détails industriels lisibles : grandes grilles de ventilation, panneaux vissés, tuyaux, conduites, câbles, connecteurs, boîtiers secondaires, cartouches techniques, éléments de refroidissement, renforts en X, plaques saillantes et bandes lumineuses verticales ou horizontales. Quelques câbles ou connecteurs puissants peuvent sortir d’une face du générateur pour suggérer sa fonction d’alimentation.\n\nPalette cohérente avec NullOn : blanc cassé / gris clair usé pour les panneaux, gunmetal foncé pour les structures et mécanismes, touches orange industrielles, lumières ambre/orange chaudes. Vieillissement réaliste : rayures, salissures, peinture usée, arêtes écaillées, traces de poussière et de maintenance, sans aller jusqu’à un aspect cassé ou post-apocalyptique.\n\nL’objet doit transmettre une sensation de fiabilité, de puissance et de modularité. Il doit sembler immédiatement intégrable à un système de construction de base, comme un asset que l’on pourrait poser dans un habitat technique ou un atelier spatial. Le niveau de détail doit être élevé, avec une lecture claire des matériaux et de la structure.\n\nÉclairage studio propre, ombres douces, rendu PBR haut de gamme, netteté élevée, aucun texte, aucune interface, aucun personnage.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9600,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 1.5,
+        "texturePrompt": "worn off-white painted panels, dark gunmetal frame and mechanics, industrial orange accents, warm amber emissive details, realistic grime, chipped edges and PBR materials",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    },
+    {
+      "id": "mineral_asteroid",
+      "prompt": "Un rendu 3D photoréaliste très détaillé, format carré 1:1, montrant un unique astéroïde minéral de l’univers NullOn, présenté comme un asset de jeu isolé sur un fond gris neutre légèrement dégradé, en vue trois-quarts, centré, sans personnage, sans texte, sans décor complexe.\n\nL’astéroïde doit avoir une silhouette irrégulière, massive, crédible, très minérale, avec de gros volumes rocheux, des fractures profondes, des cavités, des cassures et quelques petits débris flottant autour. Il ne doit pas être parfaitement rond : la forme doit être anguleuse, accidentée, asymétrique, avec plusieurs blocs rocheux imbriqués et des arêtes marquées.\n\nLa roche principale est sombre, de couleur gris charbon à gris brun, avec variations de tons, zones plus claires, poussière minérale, érosion, piqûres, surfaces cassées, creux et petits trous. Certaines zones doivent avoir un aspect plus clair, presque gris pâle ou poussiéreux, pour enrichir la lecture des matériaux. Les surfaces doivent être très détaillées : micro-relief, fissures, grains, fractures, strates et cassures nettes.\n\nDes veines minérales doivent traverser l’astéroïde de manière très lisible : veines cuivrées, dorées, orangées ou métalliques, intégrées dans les failles et fractures principales. Ces gisements doivent sembler enchâssés dans la roche, parfois brillants, parfois oxydés, avec quelques cristaux facettés ou blocs minéraux exposés. Les veines doivent apporter de forts accents visuels chauds au milieu de la roche sombre.\n\nAjouter plusieurs cavités et zones creusées, comme si l’astéroïde était naturellement fragmenté ou partiellement exploitable. Quelques petits morceaux de roche doivent flotter à proximité, suggérant une légère fragmentation et enrichissant la silhouette globale.\n\nLe rendu doit évoquer un astéroïde exploitable pour le gameplay : un objet spatial lisible, intéressant, riche en relief, avec des zones minérales clairement identifiables. Il faut une apparence réaliste, sérieuse, cohérente avec un univers de survie/extraction spatiale, et non stylisée cartoon.\n\nÉclairage studio/spatial neutre, avec une légère lumière de contour chaude et un bon contraste pour révéler les volumes. Matériaux PBR très détaillés, netteté élevée, aucune typographie, aucun personnage, aucun autre objet important que l’astéroïde lui-même.",
+      "outputs": {
+        "count": 1,
+        "seedStart": 9700,
+        "seedStep": 1
+      },
+      "params": {
+        "targetHeight": 4.0,
+        "texturePrompt": "dark charcoal and brown-gray rock, pale dusty mineral areas, copper gold and orange metallic veins embedded in fractures, realistic rough stone PBR, micro-fractures and mineral variation",
+        "textureNegativePrompt": "text, logo, watermark, environment, room, floor, background objects, people, hands"
+      }
+    }
+  ]
+}

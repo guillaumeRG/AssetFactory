@@ -1,4 +1,4 @@
-﻿"""AssetFactory multiview projection/texturing driver.
+"""AssetFactory multiview projection/texturing driver.
 
 The adapter only orchestrates multiview. Camera placement, SDXL generation,
 depth rendering, sequential projection/blending and baking are executed by
@@ -716,6 +716,56 @@ def _rebuild_bake_uv(obj) -> dict:
     return report
 
 
+def _mask_non_bake_uvs_for_vendor_bake(obj) -> list[tuple[object, str]]:
+    """Force StableGen's bake_texture() to select BakeUV.
+
+    StableGen currently selects the *first* UV layer whose name does not look
+    like one of its ProjectionUV layers.  Merely making BakeUV active is not
+    sufficient when an imported geometry UV (for example ``UVMap``) appears
+    earlier in the layer collection.  In that case StableGen bakes into the
+    imported UV, while Asset Factory later exports the baked material against
+    BakeUV, producing a completely mismatched/corrupted texture.
+
+    Do not modify StableGen upstream.  Temporarily give every other ordinary
+    UV layer a ProjectionUV-prefixed name so the vendor routine skips it, then
+    restore the exact original names immediately after the bake.
+    """
+    renamed: list[tuple[object, str]] = []
+    used_names = {layer.name for layer in obj.data.uv_layers}
+
+    for index, layer in enumerate(obj.data.uv_layers):
+        name = str(layer.name)
+        if name == "BakeUV":
+            continue
+        if name.startswith("ProjectionUV") or name == "_SG_ProjectionBuffer":
+            continue
+
+        candidate = f"ProjectionUV_AF_BAKE_SKIP_{index}"
+        suffix = 1
+        while candidate in used_names:
+            candidate = f"ProjectionUV_AF_BAKE_SKIP_{index}_{suffix}"
+            suffix += 1
+
+        renamed.append((layer, name))
+        used_names.discard(name)
+        layer.name = candidate
+        used_names.add(layer.name)
+
+    _activate_bake_uv(obj)
+    if renamed:
+        log(
+            "Temporarily masked non-bake UV layer(s) so StableGen bakes to "
+            f"BakeUV on {obj.name}: " + ", ".join(original for _, original in renamed)
+        )
+    return renamed
+
+
+def _restore_masked_uv_names(obj, renamed: list[tuple[object, str]]) -> None:
+    for layer, original_name in renamed:
+        layer.name = original_name
+    _activate_bake_uv(obj)
+
+
 def bake_direct(targets) -> list[str]:
     """Use the same direct bake path validated by the original POC.
 
@@ -744,12 +794,17 @@ def bake_direct(targets) -> list[str]:
             if uv_name != "BakeUV":
                 raise RuntimeError(f"Dedicated BakeUV was not activated on {obj.name}")
 
-            ok = bake_texture(
-                context,
-                obj,
-                ARGS.texture_resolution,
-                output_dir=get_dir_path(context, "baked"),
-            )
+            renamed_uvs = _mask_non_bake_uvs_for_vendor_bake(obj)
+            try:
+                ok = bake_texture(
+                    context,
+                    obj,
+                    ARGS.texture_resolution,
+                    output_dir=get_dir_path(context, "baked"),
+                )
+            finally:
+                _restore_masked_uv_names(obj, renamed_uvs)
+
             if not ok:
                 raise RuntimeError(f"Final texture bake failed for {obj.name}")
 
